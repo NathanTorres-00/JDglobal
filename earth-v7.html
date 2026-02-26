@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Urth V7 – Dot Globe</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%; overflow: hidden;
+      background: radial-gradient(ellipse at center,
+        #0a2347 0%,
+        #061428 55%,
+        #020810 100%
+      );
+    }
+    canvas { display: block; position: fixed; top: 0; left: 0; }
+  </style>
+</head>
+<body>
+
+<!-- Loads GeoJSON as window.CUSTOM_GEO — <script src> works on file:// (no CORS) -->
+<script src="./custom.geo.js"></script>
+
+<script type="importmap">
+{
+  "imports": {
+    "three":         "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+window.THREE = THREE;
+
+await new Promise((resolve, reject) => {
+  const s  = document.createElement('script');
+  s.src    = 'https://cdn.jsdelivr.net/npm/three-globe/dist/three-globe.min.js';
+  s.onload  = resolve;
+  s.onerror = () => reject(new Error('three-globe failed to load'));
+  document.head.appendChild(s);
+});
+
+// ── Country data ───────────────────────────────────────────────────────────────
+const countries = window.CUSTOM_GEO.features.filter(
+  f => f.properties.continent !== 'Seven seas (open ocean)'
+);
+
+// ── Land dot grid — point-in-polygon ──────────────────────────────────────────
+const _bboxes = countries.map(f => {
+  let x1=Infinity, x2=-Infinity, y1=Infinity, y2=-Infinity;
+  const rings = f.geometry.type === 'Polygon'
+    ? f.geometry.coordinates
+    : f.geometry.coordinates.flat(1);
+  for (const ring of rings)
+    for (const [lng, lat] of ring) {
+      if (lng < x1) x1 = lng;  if (lng > x2) x2 = lng;
+      if (lat < y1) y1 = lat;  if (lat > y2) y2 = lat;
+    }
+  return { f, x1, x2, y1, y2 };
+});
+
+function _inRing(lng, lat, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i], [xj, yj] = ring[j];
+    if (((yi > lat) !== (yj > lat)) && lng < (xj - xi) * (lat - yi) / (yj - yi) + xi)
+      inside = !inside;
+  }
+  return inside;
+}
+function _inFeature(lng, lat, geom) {
+  if (geom.type === 'Polygon') {
+    return _inRing(lng, lat, geom.coordinates[0]) &&
+           !geom.coordinates.slice(1).some(h => _inRing(lng, lat, h));
+  }
+  return geom.coordinates.some(poly =>
+    _inRing(lng, lat, poly[0]) && !poly.slice(1).some(h => _inRing(lng, lat, h))
+  );
+}
+
+const DOT_STEP = 1.2;
+const landDots = [];
+for (let lat = -88; lat <= 88; lat += DOT_STEP) {
+  for (let lng = -180; lng <= 180; lng += DOT_STEP) {
+    for (const b of _bboxes) {
+      if (lng < b.x1 || lng > b.x2 || lat < b.y1 || lat > b.y2) continue;
+      if (_inFeature(lng, lat, b.f.geometry)) {
+        landDots.push({ lat, lng });
+        break;
+      }
+    }
+  }
+}
+
+// ── Coordinate helper — matches three-globe's polar2Cartesian ─────────────────
+const GLOBE_R   = 100;
+const ARC_HEIGHT = 0.35;
+
+function latLonToUnit(lat, lon) {
+  const phi   = (90 - lat) * Math.PI / 180;
+  const theta = (90 - lon) * Math.PI / 180;
+  return new THREE.Vector3(
+    Math.sin(phi) * Math.cos(theta),
+    Math.cos(phi),
+    Math.sin(phi) * Math.sin(theta)
+  );
+}
+
+// ── Landing spots ─────────────────────────────────────────────────────────────
+const SPOTS = [
+  { city: 'New York',     lat:  40.7,   lng:  -74.0  },
+  { city: 'London',       lat:  51.5,   lng:   -0.1  },
+  { city: 'Tokyo',        lat:  35.7,   lng:  139.7  },
+  { city: 'Sydney',       lat: -33.9,   lng:  151.2  },
+  { city: 'Melbourne',    lat: -37.8,   lng:  144.9  },
+  { city: 'Christchurch', lat: -43.53,  lng:  172.63 },
+  { city: 'São Paulo',    lat: -23.5,   lng:  -46.6  },
+  { city: 'Abuja',        lat:   9.07,  lng:    7.40 },
+  { city: 'Dubai',        lat:  25.2,   lng:   55.3  },
+  { city: 'Bangkok',      lat:  13.75,  lng:  100.5  },
+  { city: 'Anaheim',      lat:  33.84,  lng: -117.91 },
+  { city: 'Delhi',        lat:  28.6,   lng:   77.2  },
+  { city: 'Moscow',       lat:  55.8,   lng:   37.6  },
+  { city: 'Nairobi',      lat:  -1.3,   lng:   36.8  },
+];
+
+const LANDING_SPOTS = SPOTS.map(s => latLonToUnit(s.lat, s.lng));
+
+// ── Renderer ──────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ── Scene & Camera ────────────────────────────────────────────────────────────
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 10000);
+camera.position.z = 270;
+
+// ── Controls ──────────────────────────────────────────────────────────────────
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.minDistance   = 140;
+controls.maxDistance   = 700;
+controls.rotateSpeed   = 0.5;
+
+// ── Lighting ──────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0xaabbdd, 0.55));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(120, 80, 200);
+scene.add(sun);
+
+// ── Starfield ─────────────────────────────────────────────────────────────────
+(function buildStarfield(count = 2500) {
+  const verts  = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const th = 2 * Math.PI * Math.random();
+    const ph = Math.acos(2 * Math.random() - 1);
+    const r  = 6000;
+    verts[i*3]   = r * Math.sin(ph) * Math.cos(th);
+    verts[i*3+1] = r * Math.sin(ph) * Math.sin(th);
+    verts[i*3+2] = r * Math.cos(ph);
+    const b = 0.6 + Math.random() * 0.4;
+    colors[i*3]   = b;
+    colors[i*3+1] = b;
+    colors[i*3+2] = Math.min(1, b + 0.15);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts,  3));
+  geo.setAttribute('color',    new THREE.Float32BufferAttribute(colors, 3));
+  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({
+    size:            1.5,
+    sizeAttenuation: false,
+    vertexColors:    true,
+    transparent:     true,
+    opacity:         0.85,
+    depthWrite:      false,
+  })));
+}());
+
+// ── Globe ─────────────────────────────────────────────────────────────────────
+// Dot color: desaturated light blue — enough to read as land, not vivid
+const DOT_COLOR = 'rgba(148, 190, 220, 0.72)';
+
+const globe = new ThreeGlobe()
+  .globeMaterial(new THREE.MeshPhongMaterial({
+    color:     new THREE.Color(0x020d1a),
+    shininess: 12,
+    specular:  new THREE.Color(0x112244),
+  }))
+  .atmosphereColor('lightskyblue')
+  .atmosphereAltitude(0.15)
+  // ── Land dots: only visible representation of countries ───────────────────
+  .pointsData(landDots)
+  .pointLat(d => d.lat)
+  .pointLng(d => d.lng)
+  .pointColor(() => DOT_COLOR)
+  .pointRadius(0.32)
+  .pointAltitude(0.002)
+  .pointsMerge(true)
+  // ── Rings at landing spots ────────────────────────────────────────────────
+  .ringsData(SPOTS)
+  .ringLat(d => d.lat)
+  .ringLng(d => d.lng)
+  .ringColor(() => t => `rgba(140, 200, 255, ${Math.sqrt(1 - t) * 0.75})`)
+  .ringMaxRadius(4)
+  .ringPropagationSpeed(1.2)
+  .ringRepeatPeriod(1400);
+
+globe.rotation.z = -23.4 * Math.PI / 180;
+scene.add(globe);
+
+// ── Radial glow rays at selected spots (no travelers visit these) ──────────────
+// Indices into SPOTS: London(1), Melbourne(4), Abuja(7), Anaheim(10), Nairobi(13)
+const RAY_SPOT_INDICES = [1, 4, 7, 10, 13];
+const RAY_HEIGHT = 28;
+
+// Shared time reference — one update in animate drives all rays
+const rayTime = { value: 0 };
+
+const rayVS = /* glsl */`
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+// Core: thin bright beam with wispy inner waves + slow per-ray pulse
+const rayCoreFS = /* glsl */`
+  uniform float uTime;
+  uniform float uPhase;   // unique per ray — staggers the fire timing
+  varying vec2 vUv;
+  void main() {
+    // Slow fire pulse: period ~20s, mostly dim, soft surges
+    // pow(max(0,sin),3) = narrow positive peak → mostly off, gradual flare
+    float pulse = pow(max(0.0, sin(uTime * 0.31 + uPhase)), 3.0);
+    if (pulse < 0.005) discard;
+
+    float t    = vUv.y;
+    float fade = pow(1.0 - t, 1.4);
+    float cx   = vUv.x * 2.0 - 1.0;
+    float edge = pow(1.0 - cx * cx, 1.2);
+    float wisp = 0.75 + 0.25 * sin(t * 18.0 - uTime * 2.0);
+    float alpha = fade * edge * wisp * 0.75 * pulse;
+    vec3 col = mix(vec3(0.50, 0.80, 1.00), vec3(0.78, 0.96, 1.00), t);
+    gl_FragColor = vec4(col, alpha);
+  }
+`;
+// Halo: wider soft bloom, same pulse envelope
+const rayHaloFS = /* glsl */`
+  uniform float uTime;
+  uniform float uPhase;
+  varying vec2 vUv;
+  void main() {
+    float pulse = pow(max(0.0, sin(uTime * 0.31 + uPhase)), 3.0);
+    if (pulse < 0.005) discard;
+
+    float t    = vUv.y;
+    float fade = pow(1.0 - t, 1.8);
+    float cx   = vUv.x * 2.0 - 1.0;
+    float edge = pow(1.0 - cx * cx, 0.65);
+    float wisp = 0.8 + 0.2 * sin(t * 10.0 - uTime * 1.4 + 1.2);
+    gl_FragColor = vec4(0.38, 0.68, 1.00, fade * edge * wisp * 0.22 * pulse);
+  }
+`;
+
+const _up = new THREE.Vector3(0, 1, 0);
+RAY_SPOT_INDICES.forEach((idx, i) => {
+  // Spread phases evenly so rays fire one at a time, never all together
+  const phase = (i / RAY_SPOT_INDICES.length) * Math.PI * 2;
+  const perRayUniforms = { uTime: rayTime, uPhase: { value: phase } };
+
+  const radial = LANDING_SPOTS[idx].clone();
+  const quat   = new THREE.Quaternion().setFromUnitVectors(_up, radial);
+  const center = radial.clone().multiplyScalar(GLOBE_R + RAY_HEIGHT * 0.5);
+
+  // Core: narrow beam
+  const coreGeo = new THREE.CylinderGeometry(0.15, 1.0, RAY_HEIGHT, 12, 6, true);
+  const coreMat = new THREE.ShaderMaterial({
+    uniforms:       perRayUniforms,
+    vertexShader:   rayVS,
+    fragmentShader: rayCoreFS,
+    transparent:    true,
+    depthWrite:     false,
+    blending:       THREE.AdditiveBlending,
+    side:           THREE.DoubleSide,
+  });
+  const coreMesh = new THREE.Mesh(coreGeo, coreMat);
+  coreMesh.position.copy(center);
+  coreMesh.quaternion.copy(quat);
+  globe.add(coreMesh);
+
+  // Halo: wider soft bloom
+  const haloGeo = new THREE.CylinderGeometry(0.5, 3.5, RAY_HEIGHT * 0.75, 10, 6, true);
+  const haloMat = new THREE.ShaderMaterial({
+    uniforms:       perRayUniforms,
+    vertexShader:   rayVS,
+    fragmentShader: rayHaloFS,
+    transparent:    true,
+    depthWrite:     false,
+    blending:       THREE.AdditiveBlending,
+    side:           THREE.DoubleSide,
+  });
+  const haloMesh = new THREE.Mesh(haloGeo, haloMat);
+  haloMesh.position.copy(center);
+  haloMesh.quaternion.copy(quat);
+  globe.add(haloMesh);
+});
+
+// ── Traveler Particle System ───────────────────────────────────────────────────
+const N_TRAVELERS = 18;
+const TRAIL_LEN   = 400;
+const DPR         = window.devicePixelRatio;
+const HEAD_SZ     = 6.5 * DPR;
+const TRAIL_SZ    = 3.0 * DPR;
+
+function geodesicDir(pos, target) {
+  return target.clone()
+    .addScaledVector(pos, -pos.dot(target))
+    .normalize();
+}
+
+const travelers = Array.from({ length: N_TRAVELERS }, () => {
+  const srcIdx = Math.floor(Math.random() * LANDING_SPOTS.length);
+  let   tgtIdx = srcIdx;
+  while (tgtIdx === srcIdx) tgtIdx = Math.floor(Math.random() * LANDING_SPOTS.length);
+  const pos    = LANDING_SPOTS[srcIdx].clone();
+  const tgt    = LANDING_SPOTS[tgtIdx];
+  const angle  = Math.acos(Math.min(1, Math.max(-1, pos.dot(tgt))));
+  return {
+    pos,
+    dir:        geodesicDir(pos, tgt),
+    speed:      0.004 + Math.random() * 0.003,
+    trail:      [],
+    target:     tgtIdx,
+    progress:   0,
+    totalAngle: Math.max(0.01, angle),
+  };
+});
+
+const totalPts   = N_TRAVELERS * TRAIL_LEN;
+const tPositions = new Float32Array(totalPts * 3);
+const tAlphas    = new Float32Array(totalPts);
+const tSizes     = new Float32Array(totalPts);
+
+const trailGeo = new THREE.BufferGeometry();
+trailGeo.setAttribute('position',
+  new THREE.BufferAttribute(tPositions, 3).setUsage(THREE.DynamicDrawUsage));
+trailGeo.setAttribute('aAlpha',
+  new THREE.BufferAttribute(tAlphas,    1).setUsage(THREE.DynamicDrawUsage));
+trailGeo.setAttribute('aSize',
+  new THREE.BufferAttribute(tSizes,     1).setUsage(THREE.DynamicDrawUsage));
+
+const travelVS = /* glsl */`
+  attribute float aAlpha;
+  attribute float aSize;
+  varying float   vAlpha;
+  void main() {
+    vAlpha       = aAlpha;
+    vec4 mvPos   = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = aSize;
+    gl_Position  = projectionMatrix * mvPos;
+  }
+`;
+const travelFS = /* glsl */`
+  uniform vec3  uColor;
+  varying float vAlpha;
+  void main() {
+    vec2  cxy  = 2.0 * gl_PointCoord - 1.0;
+    float r    = dot(cxy, cxy);
+    if (r > 1.0) discard;
+    float glow = exp(-r * 2.8) + exp(-r * 8.0) * 0.6;
+    gl_FragColor = vec4(uColor, vAlpha * glow);
+  }
+`;
+const glowVS = /* glsl */`
+  attribute float aAlpha;
+  attribute float aSize;
+  varying float   vAlpha;
+  void main() {
+    vAlpha       = aAlpha;
+    vec4 mvPos   = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = aSize * 3.5;
+    gl_Position  = projectionMatrix * mvPos;
+  }
+`;
+const glowFS = /* glsl */`
+  uniform vec3  uColor;
+  varying float vAlpha;
+  void main() {
+    vec2  cxy  = 2.0 * gl_PointCoord - 1.0;
+    float r    = dot(cxy, cxy);
+    if (r > 1.0) discard;
+    float halo = exp(-r * 1.1);
+    gl_FragColor = vec4(uColor, vAlpha * halo * 0.16);
+  }
+`;
+
+const trailMat = new THREE.ShaderMaterial({
+  uniforms:       { uColor: { value: new THREE.Color(0xc8e6ff) } },
+  vertexShader:   travelVS,
+  fragmentShader: travelFS,
+  transparent:    true,
+  depthWrite:     false,
+});
+const glowMat = new THREE.ShaderMaterial({
+  uniforms:       { uColor: { value: new THREE.Color(0x88bbff) } },
+  vertexShader:   glowVS,
+  fragmentShader: glowFS,
+  transparent:    true,
+  depthWrite:     false,
+});
+
+const trailMesh = new THREE.Points(trailGeo, trailMat);
+const glowMesh  = new THREE.Points(trailGeo, glowMat);
+trailMesh.renderOrder = 2;
+glowMesh.renderOrder  = 1;
+globe.add(glowMesh);
+globe.add(trailMesh);
+
+function updateTravelers() {
+  travelers.forEach((t, ti) => {
+    const newPos = t.pos.clone().addScaledVector(t.dir, t.speed).normalize();
+    const newDir = t.dir.clone()
+      .addScaledVector(newPos, -t.dir.dot(newPos))
+      .normalize();
+
+    const targetPos    = LANDING_SPOTS[t.target];
+    const distToTarget = newPos.distanceTo(targetPos);
+    const toTarget     = geodesicDir(newPos, targetPos);
+    const steerFactor  = Math.min(0.92, 0.018 / Math.max(distToTarget, 0.018));
+    newDir.lerp(toTarget, steerFactor).normalize();
+    newDir.addScaledVector(newPos, -newDir.dot(newPos)).normalize();
+
+    if (distToTarget < 0.025) {
+      newPos.copy(targetPos);
+      let next = t.target;
+      while (next === t.target) next = Math.floor(Math.random() * LANDING_SPOTS.length);
+      const newTgt   = LANDING_SPOTS[next];
+      const newAngle = Math.acos(Math.min(1, Math.max(-1, newPos.dot(newTgt))));
+      t.target     = next;
+      t.dir        = geodesicDir(newPos, newTgt);
+      t.progress   = 0;
+      t.totalAngle = Math.max(0.01, newAngle);
+    } else {
+      t.dir = newDir;
+    }
+
+    t.progress      = Math.min(1.0, t.progress + t.speed / t.totalAngle);
+    const arcFactor = GLOBE_R * (1.0 + ARC_HEIGHT * Math.sin(t.progress * Math.PI));
+    const arcPos    = newPos.clone().multiplyScalar(arcFactor);
+
+    t.pos = newPos;
+    t.trail.unshift(arcPos);
+    if (t.trail.length > TRAIL_LEN) t.trail.pop();
+
+    const base = ti * TRAIL_LEN;
+    for (let i = 0; i < TRAIL_LEN; i++) {
+      const bi = (base + i) * 3;
+      if (i < t.trail.length) {
+        const p  = t.trail[i];
+        tPositions[bi]     = p.x;
+        tPositions[bi + 1] = p.y;
+        tPositions[bi + 2] = p.z;
+        const frac        = 1.0 - i / t.trail.length;
+        tAlphas[base + i] = frac * frac;
+        tSizes [base + i] = i === 0 ? HEAD_SZ : TRAIL_SZ * frac;
+      } else {
+        tAlphas[base + i] = 0;
+        tSizes [base + i] = 0;
+      }
+    }
+  });
+
+  trailGeo.attributes.position.needsUpdate = true;
+  trailGeo.attributes.aAlpha.needsUpdate   = true;
+  trailGeo.attributes.aSize.needsUpdate    = true;
+}
+
+// ── Resize ────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ── Render loop ───────────────────────────────────────────────────────────────
+function animate() {
+  requestAnimationFrame(animate);
+  globe.rotation.y += 0.001;
+  rayTime.value = performance.now() / 1000;
+  updateTravelers();
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+animate();
+</script>
+</body>
+</html>
