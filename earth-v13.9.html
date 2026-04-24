@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Urth V13.9 – Inside Sphere + Background Shell</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── Config ────────────────────────────────────────────────────────────────────
+const SPHERE_R     = 300;
+const CARD_W       = 110;
+const CARD_H       = 62;
+const ROTATE_SPEED = 0.08; // rad/s — slower for cinematic inside-view
+
+// 3 rows per hemisphere at shallow latitudes so camera at origin with FOV 75°
+// can see all of them (poles would fall outside the vertical FOV).
+// brick=1 rows offset by half slot for staggered wall look.
+const ROWS = [
+  { lat:  15, count: 12, brick: 0 },
+  { lat:  32, count: 10, brick: 1 },
+  { lat:  50, count:  8, brick: 0 },
+  { lat: -15, count: 12, brick: 1 },
+  { lat: -32, count: 10, brick: 0 },
+  { lat: -50, count:  8, brick: 1 },
+];
+
+const IMAGES = [
+  '/images/house-church-1.jpg',
+  '/images/house-church-2.jpg',
+  '/images/house-church-3.jpg',
+  '/images/house-church-4.jpg',
+  '/images/house-church.jpg',
+  '/images/baptism-1.jpg',
+  '/images/dr-lin-baptism.png',
+  '/images/imags-archive-3.png',
+  '/images/nano-baptism.png',
+  '/images/image-14-1.jpeg',
+];
+const TOTAL_SLOTS = 20;
+const ATLAS_COLS = 5, ATLAS_ROWS = 4, IMG_W = 320, IMG_H = 180;
+
+// ── Atlas ─────────────────────────────────────────────────────────────────────
+const atlasCanvas = document.createElement('canvas');
+atlasCanvas.width  = ATLAS_COLS * IMG_W;
+atlasCanvas.height = ATLAS_ROWS * IMG_H;
+const atx = atlasCanvas.getContext('2d');
+atx.fillStyle = '#111';
+atx.fillRect(0, 0, atlasCanvas.width, atlasCanvas.height);
+
+const atlas = new THREE.CanvasTexture(atlasCanvas);
+atlas.colorSpace = THREE.SRGBColorSpace;
+atlas.flipY = false;
+
+function drawCover(ctx, img, dx, dy, dw, dh) {
+  const imgAspect = img.naturalWidth / img.naturalHeight;
+  const dstAspect = dw / dh;
+  let sx, sy, sw, sh;
+  if (imgAspect > dstAspect) {
+    sh = img.naturalHeight; sw = sh * dstAspect;
+    sx = (img.naturalWidth - sw) / 2; sy = 0;
+  } else {
+    sw = img.naturalWidth; sh = sw / dstAspect;
+    sx = 0; sy = (img.naturalHeight - sh) / 2;
+  }
+  ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+}
+
+for (let i = 0; i < TOTAL_SLOTS; i++) {
+  const col = i % ATLAS_COLS, row = Math.floor(i / ATLAS_COLS);
+  const img = new Image();
+  img.onload = () => { drawCover(atx, img, col * IMG_W, row * IMG_H, IMG_W, IMG_H); atlas.needsUpdate = true; };
+  img.src = IMAGES[i % IMAGES.length];
+}
+
+// ── Renderer / Scene / Camera ─────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, 1, 1, 6000);
+
+// Camera sits at sphere center and looks OUTWARD toward +Z (the interior wall).
+// Rotating 180° around Y flips camera from its default -Z look direction.
+camera.position.set(0, 0, 0);
+camera.rotation.y = Math.PI;
+
+function fitCamera() {
+  const w = window.innerWidth, h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+fitCamera();
+window.addEventListener('resize', fitCamera);
+
+// ── Card shader ───────────────────────────────────────────────────────────────
+const cardVS = `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+const cardFS = `
+  uniform sampler2D uAtlas;
+  uniform float     uPhotoIdx;
+  uniform float     uReady;
+  uniform float     uOpacityMult;
+  varying vec2 vUv;
+  const float COLS = 5.0;
+  const float ROWS = 4.0;
+  void main() {
+    const float ASPECT = 16.0 / 9.0;
+    vec2  p = vUv * 2.0 - 1.0;
+    p.x *= ASPECT;
+    float r = 0.20;
+    vec2  q = abs(p) - vec2(ASPECT, 1.0) + r;
+    float d = length(max(q, 0.0)) - r;
+    float tol = 0.025;
+    if (d > tol) discard;
+    float edge = 1.0 - smoothstep(-tol, tol, d);
+
+    float aCol = mod(uPhotoIdx, COLS);
+    float aRow = floor(uPhotoIdx / COLS);
+    vec2 uv = vec2(
+      (aCol + vUv.x) / COLS,
+      (aRow + (1.0 - vUv.y)) / ROWS
+    );
+    vec4 col = texture2D(uAtlas, uv);
+
+    col.rgb = pow(col.rgb, vec3(0.55));
+    col.rgb *= 1.15;
+    col.rgb = clamp(col.rgb, 0.0, 1.0);
+
+    float bw = 0.12;
+    float border = step(-bw, d) * (1.0 - step(0.0, d));
+    col.rgb = mix(col.rgb, vec3(0.90, 0.95, 1.0), border * 0.18);
+
+    gl_FragColor = vec4(col.rgb, col.a * edge * uReady * uOpacityMult);
+  }
+`;
+
+// ── Globe groups: inner (primary) + outer (background shell) ──────────────────
+const globeGroup = new THREE.Group();
+const outerGroup = new THREE.Group();
+scene.add(globeGroup);
+scene.add(outerGroup);
+
+const OUTER_SCALE      = 8.0;  // radius multiplier
+const OUTER_CARD_SCALE = 2.5;  // card-size multiplier (less than radius = looks farther)
+const OUTER_OPACITY    = 0.28; // dimmer background
+
+// Denser rows on outer shell — more surface area, pack more cards
+const OUTER_ROWS = [
+  { lat:  10, count: 20, brick: 0 },
+  { lat:  22, count: 18, brick: 1 },
+  { lat:  35, count: 16, brick: 0 },
+  { lat:  48, count: 14, brick: 1 },
+  { lat:  62, count: 10, brick: 0 },
+  { lat: -10, count: 20, brick: 1 },
+  { lat: -22, count: 18, brick: 0 },
+  { lat: -35, count: 16, brick: 1 },
+  { lat: -48, count: 14, brick: 0 },
+  { lat: -62, count: 10, brick: 1 },
+];
+
+// ── Neighbor-aware photo assignment for any row config ────────────────────────
+const NUM_UNIQUE   = IMAGES.length;
+const NEIGHBOR_COS = Math.cos(40 * Math.PI / 180);
+
+function buildAssignment(rows) {
+  const specs = [];
+  rows.forEach(row => {
+    const latR = row.lat * Math.PI / 180;
+    const cosLat = Math.cos(latR), sinLat = Math.sin(latR);
+    const angStep = (Math.PI * 2) / row.count;
+    const brickOff = row.brick ? angStep * 0.5 : 0;
+    for (let j = 0; j < row.count; j++) {
+      const lonR = brickOff + j * angStep;
+      specs.push({
+        x: cosLat * Math.sin(lonR),
+        y: sinLat,
+        z: cosLat * Math.cos(lonR),
+      });
+    }
+  });
+  const nbrs = specs.map((a, i) => {
+    const n = [];
+    specs.forEach((b, k) => {
+      if (k !== i && a.x*b.x + a.y*b.y + a.z*b.z > NEIGHBOR_COS) n.push(k);
+    });
+    return n;
+  });
+  function tryAssign() {
+    const out = new Array(specs.length).fill(-1);
+    const order = [...out.keys()].sort(() => Math.random() - 0.5);
+    for (const i of order) {
+      const banned = new Set();
+      nbrs[i].forEach(n => { if (out[n] >= 0) banned.add(out[n]); });
+      const opts = [];
+      for (let p = 0; p < NUM_UNIQUE; p++) if (!banned.has(p)) opts.push(p);
+      if (!opts.length) return null;
+      out[i] = opts[Math.floor(Math.random() * opts.length)];
+    }
+    return out;
+  }
+  let a = null;
+  for (let t = 0; t < 200 && !a; t++) a = tryAssign();
+  return a || specs.map((_, i) => i % NUM_UNIQUE);
+}
+
+const innerAssignment = buildAssignment(ROWS);
+const outerAssignment = buildAssignment(OUTER_ROWS);
+
+// ── Place cards on INSIDE of sphere (facing inward) ───────────────────────────
+function buildSphere(group, rows, assignment, radius, cardW, cardH, opacityMult) {
+  let photoIdx = 0;
+  rows.forEach(row => {
+    const latR   = row.lat * Math.PI / 180;
+    const cosLat = Math.cos(latR);
+    const sinLat = Math.sin(latR);
+    const angStep  = (Math.PI * 2) / row.count;
+    const brickOff = row.brick ? angStep * 0.5 : 0;
+
+    for (let j = 0; j < row.count; j++) {
+      const lonR   = brickOff + j * angStep;
+      const cosLon = Math.cos(lonR);
+      const sinLon = Math.sin(lonR);
+
+      const x = radius * cosLat * sinLon;
+      const y = radius * sinLat;
+      const z = radius * cosLat * cosLon;
+
+      const east    = new THREE.Vector3(cosLon, 0, -sinLon);
+      const north   = new THREE.Vector3(-sinLat * sinLon, cosLat, -sinLat * cosLon);
+      const normal  = new THREE.Vector3(cosLat * sinLon, sinLat, cosLat * cosLon);
+      const westV   = east.clone().negate();
+      const inward  = normal.clone().negate();
+
+      const uni = {
+        uAtlas:       { value: atlas },
+        uPhotoIdx:    { value: assignment[photoIdx] },
+        uReady:       { value: 0.0 },
+        uOpacityMult: { value: opacityMult },
+      };
+
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(cardW, cardH),
+        new THREE.ShaderMaterial({
+          uniforms: uni, vertexShader: cardVS, fragmentShader: cardFS,
+          transparent: true, depthWrite: false,
+        })
+      );
+
+      mesh.position.set(x, y, z);
+      const m = new THREE.Matrix4();
+      m.makeBasis(westV, north, inward);
+      mesh.setRotationFromMatrix(m);
+
+      group.add(mesh);
+
+      const fadeIn = () => {
+        uni.uReady.value = Math.min(1.0, uni.uReady.value + 0.018);
+        if (uni.uReady.value < 1.0) requestAnimationFrame(fadeIn);
+      };
+      fadeIn();
+
+      photoIdx++;
+    }
+  });
+}
+
+buildSphere(globeGroup, ROWS,       innerAssignment, SPHERE_R,               CARD_W,                    CARD_H,                    1.0);
+buildSphere(outerGroup, OUTER_ROWS, outerAssignment, SPHERE_R * OUTER_SCALE, CARD_W * OUTER_CARD_SCALE, CARD_H * OUTER_CARD_SCALE, OUTER_OPACITY);
+
+// ── Animate ───────────────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+  globeGroup.rotation.y = t * ROTATE_SPEED;
+  outerGroup.rotation.y = t * ROTATE_SPEED * 0.55; // drift slower for parallax
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>

@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Urth V4 – Vertex Earth</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%; overflow: hidden;
+      background: radial-gradient(ellipse at center,
+        #0a2347 0%,
+        #061428 55%,
+        #020810 100%
+      );
+    }
+    canvas { display: block; position: fixed; top: 0; left: 0; }
+  </style>
+</head>
+<body>
+
+<script type="importmap">
+{
+  "imports": {
+    "three":         "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls }    from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer }   from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass }       from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass }  from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass }       from 'three/addons/postprocessing/OutputPass.js';
+
+// ── Texture CDN ───────────────────────────────────────────────────────────────
+const T4 = 'https://raw.githubusercontent.com/turban/webgl-earth/master/images/';
+
+// ── Renderer — opaque so EffectComposer bloom works correctly ─────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setClearColor(0x020810);
+renderer.outputColorSpace = THREE.LinearSRGBColorSpace; // OutputPass does the sRGB conversion
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+
+// ── Scene & Camera ────────────────────────────────────────────────────────────
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.z = 2.75;
+
+// ── Post-processing: bloom (must come after scene & camera) ───────────────────
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.32,   // strength  — reduced to prevent over-glow
+  0.55,   // radius    — how far it spreads
+  0.20    // threshold — raised so only bright travelers/beacons/atmos bloom
+);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());   // tone-map & gamma-correct final output
+
+// ── Controls ──────────────────────────────────────────────────────────────────
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping   = true;
+controls.dampingFactor   = 0.05;
+controls.minDistance     = 1.8;
+controls.maxDistance     = 12;
+
+// ── Textures ──────────────────────────────────────────────────────────────────
+const loader   = new THREE.TextureLoader();
+const colorMap = loader.load(T4 + '2_no_clouds_4k.jpg');  // 4k day surface
+const elevMap  = loader.load(T4 + 'elev_bump_4k.jpg');    // 4k elevation
+const waterMap = loader.load(T4 + 'water_4k.png');        // water mask: 1=ocean, 0=land
+
+// ── Starfield — fixed in scene, doesn't rotate with globe ────────────────────
+function buildStarfield(count = 2500) {
+  const verts  = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const theta = 2 * Math.PI * Math.random();
+    const phi   = Math.acos(2 * Math.random() - 1);
+    const r     = 60;
+    verts[i*3]     = r * Math.sin(phi) * Math.cos(theta);
+    verts[i*3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+    verts[i*3 + 2] = r * Math.cos(phi);
+    // Cold white to soft blue-white variation
+    const b = 0.6 + Math.random() * 0.4;
+    colors[i*3]     = b;
+    colors[i*3 + 1] = b;
+    colors[i*3 + 2] = Math.min(1.0, b + 0.15);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts,  3));
+  geo.setAttribute('color',    new THREE.Float32BufferAttribute(colors, 3));
+  const mat = new THREE.PointsMaterial({
+    size:            1.2,
+    sizeAttenuation: false,   // crisp pixel size regardless of zoom
+    vertexColors:    true,
+    transparent:     true,
+    opacity:         0.85,
+    depthWrite:      false,
+  });
+  return new THREE.Points(geo, mat);
+}
+scene.add(buildStarfield());
+
+// ── Globe Group (axial tilt) ──────────────────────────────────────────────────
+const globeGroup = new THREE.Group();
+globeGroup.rotation.z = -23.4 * Math.PI / 180;
+scene.add(globeGroup);
+
+// ── Atmospheric glow — two-layer system, both sun-brightened ──────────────────
+// Shared vertex shader for both atmosphere layers
+const atmosVS = /* glsl */`
+  varying vec3 vNormal;
+  varying vec3 vViewPos;
+  varying vec3 vWorldNormal;
+  void main() {
+    vNormal      = normalize(normalMatrix * normal);
+    vWorldNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+    vec4 mvp     = modelViewMatrix * vec4(position, 1.0);
+    vViewPos     = mvp.xyz;
+    gl_Position  = projectionMatrix * mvp;
+  }
+`;
+
+// Layer 1 — inner mist (radius 1.08): near-uniform veil across the whole face
+const innerAtmosFS = /* glsl */`
+  uniform vec3 uLightDir;
+  varying vec3 vNormal;
+  varying vec3 vViewPos;
+  varying vec3 vWorldNormal;
+  void main() {
+    float rim   = 1.0 - abs(dot(normalize(vNormal), normalize(-vViewPos)));
+    float sun   = 0.55 + 0.45 * max(0.0, dot(vWorldNormal, normalize(uLightDir)));
+    float alpha = pow(rim, 0.65) * 0.22 * sun;
+    vec3  color = vec3(0.72, 0.85, 0.97);
+    gl_FragColor = vec4(color, alpha);
+  }
+`;
+
+
+const LIGHT_VEC = new THREE.Vector3(1.2, 1.0, 2.2).normalize();
+
+function makeAtmosMat(fs) {
+  return new THREE.ShaderMaterial({
+    uniforms:       { uLightDir: { value: LIGHT_VEC } },
+    vertexShader:   atmosVS,
+    fragmentShader: fs,
+    side:           THREE.BackSide,
+    blending:       THREE.AdditiveBlending,
+    transparent:    true,
+    depthWrite:     false,
+  });
+}
+
+// Single inner mist layer
+const atmosMesh = new THREE.Mesh(new THREE.IcosahedronGeometry(1.08, 32), makeAtmosMat(innerAtmosFS));
+atmosMesh.renderOrder = -1;
+globeGroup.add(atmosMesh);
+
+// ── Solid backdrop sphere — fills gaps between vertex points ─────────────────
+// Uses the same 7-stop ocean gradient + lighting as the point cloud so that
+// inter-vertex gaps show the correct depth color, not a flat backdrop.
+const backdropVS = /* glsl */`
+  varying vec2 vUv;
+  varying vec3 vWorldNormal;
+  void main() {
+    vUv          = uv;
+    vWorldNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+    gl_Position  = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+const backdropFS = /* glsl */`
+  uniform sampler2D uWaterTex;
+  uniform sampler2D uElevTex;
+  uniform vec3      uLightDir;
+  varying vec2 vUv;
+  varying vec3 vWorldNormal;
+  void main() {
+    float water = texture2D(uWaterTex, vUv).r;
+    float elv   = texture2D(uElevTex,  vUv).r;
+
+    // Identical 7-stop gradient to the point cloud fragment shader
+    vec3 c0 = vec3(0.003, 0.010, 0.068);
+    vec3 c1 = vec3(0.006, 0.025, 0.130);
+    vec3 c2 = vec3(0.012, 0.055, 0.210);
+    vec3 c3 = vec3(0.022, 0.110, 0.320);
+    vec3 c4 = vec3(0.038, 0.200, 0.440);
+    vec3 c5 = vec3(0.075, 0.360, 0.560);
+    vec3 c6 = vec3(0.160, 0.580, 0.660);
+
+    float s = clamp(elv * 2.4, 0.0, 1.0);
+    vec3 oceanColor =
+      s < 1.0/6.0 ? mix(c0, c1, s * 6.0) :
+      s < 2.0/6.0 ? mix(c1, c2, s * 6.0 - 1.0) :
+      s < 3.0/6.0 ? mix(c2, c3, s * 6.0 - 2.0) :
+      s < 4.0/6.0 ? mix(c3, c4, s * 6.0 - 3.0) :
+      s < 5.0/6.0 ? mix(c4, c5, s * 6.0 - 4.0) :
+                    mix(c5, c6, s * 6.0 - 5.0);
+
+    // Land areas stay near-black — covered by point cloud land dots anyway
+    vec3 color = mix(vec3(0.008, 0.010, 0.015), oceanColor, water);
+
+    float diffuse  = max(0.0, dot(vWorldNormal, normalize(uLightDir)));
+    float lighting = 0.10 + 0.90 * diffuse;
+    color *= lighting;
+
+    gl_FragColor = vec4(color, 1.0);
+  }
+`;
+const backdropMesh = new THREE.Mesh(
+  new THREE.IcosahedronGeometry(0.995, 64),
+  new THREE.ShaderMaterial({
+    uniforms: {
+      uElevTex:  { value: elevMap  },
+      uWaterTex: { value: waterMap },
+      uLightDir: { value: LIGHT_VEC },
+    },
+    vertexShader:   backdropVS,
+    fragmentShader: backdropFS,
+  })
+);
+globeGroup.add(backdropMesh);
+
+// ── 1. Wireframe Ghost Sphere ─────────────────────────────────────────────────
+const ghostGeo = new THREE.IcosahedronGeometry(1, 16);
+globeGroup.add(new THREE.Mesh(ghostGeo, new THREE.MeshBasicMaterial({
+  color:       0xaaccff,   // soft blue-white to complement atmosphere
+  wireframe:   true,
+  transparent: true,
+  opacity:     0.07,
+})));
+
+// ── 2. Vertex Point Cloud (detail=220 → ~484k vertices) ───────────────────────
+const pointsGeo = new THREE.IcosahedronGeometry(1, 220);
+
+// ── Vertex Shader ─────────────────────────────────────────────────────────────
+const vertexShader = /* glsl */`
+  uniform float     uSize;
+  uniform sampler2D uElevTex;
+
+  varying vec2  vUv;
+  varying float vVisible;
+  varying float vElev;
+  varying vec3  vWorldNormal;
+  varying vec3  vViewNormal;   // view-space normal for rim calculation
+  varying vec3  vMvPos;        // view-space position for rim calculation
+
+  void main() {
+    vUv = uv;
+
+    vec4 mvPos    = modelViewMatrix * vec4(position, 1.0);
+    vec3 mvNormal = normalMatrix * normal;
+
+    // Discard back-facing points (facing away from camera)
+    vVisible = step(0.0, dot(-normalize(mvPos.xyz), normalize(mvNormal)));
+
+    // World-space normal for lighting (sphere normal == normalized position)
+    vWorldNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+    vViewNormal  = normalize(mvNormal);
+    vMvPos       = mvPos.xyz;
+
+    // Elevation: push each point along view-Z proportional to terrain height
+    float elv = texture2D(uElevTex, uv).r;
+    vElev      = elv;
+    mvPos.z   += 0.12 * elv;
+
+    // Point size scales slightly with elevation for mountain peaks
+    gl_PointSize = uSize * (1.0 + elv * 0.3);
+    gl_Position  = projectionMatrix * mvPos;
+  }
+`;
+
+// ── Fragment Shader ───────────────────────────────────────────────────────────
+const fragmentShader = /* glsl */`
+  uniform sampler2D uColorTex;
+  uniform sampler2D uWaterTex;
+  uniform vec3      uLightDir;    // world-space key light direction
+  uniform vec3      uCameraDir;   // world-space direction from globe center → camera
+
+  varying vec2  vUv;
+  varying float vVisible;
+  varying float vElev;
+  varying vec3  vWorldNormal;
+  varying vec3  vViewNormal;
+  varying vec3  vMvPos;
+
+  void main() {
+    // Discard back-facing vertices (set in vertex shader)
+    if (floor(vVisible + 0.1) == 0.0) discard;
+
+    // Round point shape (discard corners of gl_PointCoord square)
+    vec2 cxy   = 2.0 * gl_PointCoord - 1.0;
+    float r    = dot(cxy, cxy);
+    if (r > 1.0) discard;
+
+    float water    = texture2D(uWaterTex, vUv).r;
+    vec3 landColor = texture2D(uColorTex, vUv).rgb;
+
+    // 7-stop bathymetric gradient: abyssal near-black → coastal light teal
+    // s=0 → deepest trench, s=1 → shallowest coastal shelf
+    vec3 c0 = vec3(0.003, 0.010, 0.068);  // abyssal — near-black navy
+    vec3 c1 = vec3(0.006, 0.025, 0.130);  // deep abyss
+    vec3 c2 = vec3(0.012, 0.055, 0.210);  // deep ocean
+    vec3 c3 = vec3(0.022, 0.110, 0.320);  // mid ocean
+    vec3 c4 = vec3(0.038, 0.200, 0.440);  // upper ocean
+    vec3 c5 = vec3(0.075, 0.360, 0.560);  // continental shelf
+    vec3 c6 = vec3(0.160, 0.580, 0.660);  // coastal — light teal
+
+    float s = clamp(vElev * 2.4, 0.0, 1.0);
+    vec3 oceanColor =
+      s < 1.0/6.0 ? mix(c0, c1, s * 6.0) :
+      s < 2.0/6.0 ? mix(c1, c2, s * 6.0 - 1.0) :
+      s < 3.0/6.0 ? mix(c2, c3, s * 6.0 - 2.0) :
+      s < 4.0/6.0 ? mix(c3, c4, s * 6.0 - 3.0) :
+      s < 5.0/6.0 ? mix(c4, c5, s * 6.0 - 4.0) :
+                    mix(c5, c6, s * 6.0 - 5.0);
+
+    // Blend land texture vs ocean gradient based on water mask
+    vec3 color = mix(landColor, oceanColor, water);
+
+    // Key light: Lambert diffuse + low ambient
+    float diffuse  = max(0.0, dot(vWorldNormal, normalize(uLightDir)));
+    float lighting = 0.10 + 0.90 * diffuse;
+    color *= lighting;
+
+    // Rim factor: 0 at globe center, 1 at silhouette edge (view-space)
+    float rimFactor = 1.0 - abs(dot(vViewNormal, normalize(-vMvPos)));
+
+    // Rim accent light: cool blue-white highlight at visible silhouette edges
+    float rim = pow(rimFactor, 3.5);
+    color += vec3(0.45, 0.65, 1.0) * rim * 0.40;
+
+    // Back light: camera-parented, wraps a softer glow around the silhouette
+    // uCameraDir points globe→camera; back light is the opposite hemisphere
+    float backRim = pow(rimFactor, 1.8);
+    color += vec3(0.18, 0.30, 0.65) * backRim * 0.18;
+
+    gl_FragColor = vec4(color, 1.0);
+  }
+`;
+
+const uniforms = {
+  uSize:      { value: 4.0 },
+  uColorTex:  { value: colorMap },
+  uElevTex:   { value: elevMap  },
+  uWaterTex:  { value: waterMap },
+  uLightDir:  { value: LIGHT_VEC },
+  uCameraDir: { value: new THREE.Vector3(0, 0, 1) }, // updated each frame
+};
+
+const pointsMat = new THREE.ShaderMaterial({
+  uniforms,
+  vertexShader,
+  fragmentShader,
+  transparent: true,
+  depthWrite:  false,
+});
+
+globeGroup.add(new THREE.Points(pointsGeo, pointsMat));
+
+// ── 3. Landing Spots ──────────────────────────────────────────────────────────
+function latLonToVec3(lat, lon) {
+  const phi   = (90 - lat) * Math.PI / 180;
+  const theta = lon * Math.PI / 180;
+  return new THREE.Vector3(
+    -Math.sin(phi) * Math.cos(theta),
+     Math.cos(phi),
+    -Math.sin(phi) * Math.sin(theta)
+  );
+}
+
+const LANDING_SPOTS = [
+  latLonToVec3( 40.7,  -74.0),    // New York
+  latLonToVec3( 51.5,   -0.1),    // London
+  latLonToVec3( 35.7,  139.7),    // Tokyo
+  latLonToVec3(-33.9,  151.2),    // Sydney
+  latLonToVec3(-37.8,  144.9),    // Melbourne
+  latLonToVec3(-43.53, 172.63),   // Christchurch (NZ)
+  latLonToVec3(-23.5,  -46.6),    // São Paulo
+  latLonToVec3(  9.07,   7.40),   // Abuja
+  latLonToVec3( 25.2,   55.3),    // Dubai
+  latLonToVec3( 13.75, 100.5),    // Bangkok
+  latLonToVec3( 33.84, -117.91),  // Anaheim
+  latLonToVec3( 28.6,   77.2),    // Delhi
+  latLonToVec3( 55.8,   37.6),    // Moscow
+  latLonToVec3( -1.3,   36.8),    // Nairobi
+];
+
+// ── Beacon geometry: one point per landing spot ───────────────────────────────
+const spotGeo = new THREE.BufferGeometry();
+spotGeo.setAttribute('position', new THREE.Float32BufferAttribute(
+  LANDING_SPOTS.flatMap(v => [v.x, v.y, v.z]), 3
+));
+// Staggered phase offsets so pulses don't all fire at once
+spotGeo.setAttribute('aPhase', new THREE.Float32BufferAttribute(
+  LANDING_SPOTS.map((_, i) => i / LANDING_SPOTS.length), 1
+));
+
+const spotVS = /* glsl */`
+  attribute float aPhase;
+  varying float   vPhase;
+  varying float   vVisible;
+  void main() {
+    vPhase       = aPhase;
+    vec4 mvPos   = modelViewMatrix * vec4(position, 1.0);
+    // For a unit sphere the outward normal equals the position vector
+    vec3 mvNormal = normalize((modelViewMatrix * vec4(position, 0.0)).xyz);
+    vVisible     = step(0.0, dot(-normalize(mvPos.xyz), mvNormal));
+    gl_PointSize = 52.0;
+    gl_Position  = projectionMatrix * mvPos;
+  }
+`;
+
+const spotFS = /* glsl */`
+  uniform float uTime;
+  varying float vPhase;
+  varying float vVisible;
+  void main() {
+    if (vVisible < 0.5) discard;   // hide beacons on the back of the globe
+    vec2  cxy  = 2.0 * gl_PointCoord - 1.0;
+    float r    = dot(cxy, cxy);
+    if (r > 1.0) discard;
+    float dist = sqrt(r);
+
+    // Tight bright core
+    float core = exp(-dist * 10.0);
+
+    // Expanding pulse ring: radiates outward, fades as it expands
+    float t    = fract(uTime * 0.6 + vPhase);
+    float ring = exp(-pow(dist - t * 0.85, 2.0) * 40.0) * (1.0 - t);
+
+    float alpha = clamp(core * 0.95 + ring * 0.6, 0.0, 1.0);
+    gl_FragColor = vec4(1.0, 1.0, 1.0, alpha);
+  }
+`;
+
+const spotMat = new THREE.ShaderMaterial({
+  uniforms:       { uTime: { value: 0 } },
+  vertexShader:   spotVS,
+  fragmentShader: spotFS,
+  transparent:    true,
+  depthWrite:     false,
+});
+
+const spotMesh = new THREE.Points(spotGeo, spotMat);
+spotMesh.renderOrder = 3;   // renders on top of travelers
+globeGroup.add(spotMesh);
+
+// ── 4. Traveling Particles with Light Trails ──────────────────────────────────
+const N_TRAVELERS = 18;
+const TRAIL_LEN   = 400;
+const DPR         = window.devicePixelRatio;
+const HEAD_SZ     = 6.5 * DPR;
+const TRAIL_SZ    = 3.0 * DPR;
+
+// Returns the tangent direction on the sphere pointing from pos toward target
+function geodesicDir(pos, target) {
+  return target.clone()
+    .addScaledVector(pos, -pos.dot(target))
+    .normalize();
+}
+
+const ARC_HEIGHT = 0.35;   // how far above the surface the arc peaks (in globe radii)
+
+// Each traveler starts at a random landing spot, aims for a different one
+const travelers = Array.from({ length: N_TRAVELERS }, () => {
+  const srcIdx = Math.floor(Math.random() * LANDING_SPOTS.length);
+  let   tgtIdx = srcIdx;
+  while (tgtIdx === srcIdx) tgtIdx = Math.floor(Math.random() * LANDING_SPOTS.length);
+  const pos    = LANDING_SPOTS[srcIdx].clone();
+  const tgt    = LANDING_SPOTS[tgtIdx];
+  const angle  = Math.acos(Math.min(1, Math.max(-1, pos.dot(tgt))));
+  return {
+    pos,
+    dir:        geodesicDir(pos, tgt),
+    speed:      0.004 + Math.random() * 0.003,
+    trail:      [],
+    target:     tgtIdx,
+    progress:   0,
+    totalAngle: Math.max(0.01, angle),
+  };
+});
+
+// Pre-allocated typed arrays — zero heap pressure per frame
+const totalPts   = N_TRAVELERS * TRAIL_LEN;
+const tPositions = new Float32Array(totalPts * 3);
+const tAlphas    = new Float32Array(totalPts);
+const tSizes     = new Float32Array(totalPts);
+
+const trailGeo = new THREE.BufferGeometry();
+trailGeo.setAttribute('position',
+  new THREE.BufferAttribute(tPositions, 3).setUsage(THREE.DynamicDrawUsage));
+trailGeo.setAttribute('aAlpha',
+  new THREE.BufferAttribute(tAlphas,    1).setUsage(THREE.DynamicDrawUsage));
+trailGeo.setAttribute('aSize',
+  new THREE.BufferAttribute(tSizes,     1).setUsage(THREE.DynamicDrawUsage));
+
+const travelVS = /* glsl */`
+  attribute float aAlpha;
+  attribute float aSize;
+  varying float   vAlpha;
+  void main() {
+    vAlpha       = aAlpha;
+    vec4 mvPos   = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = aSize;
+    gl_Position  = projectionMatrix * mvPos;
+  }
+`;
+
+const travelFS = /* glsl */`
+  uniform vec3  uColor;
+  varying float vAlpha;
+  void main() {
+    vec2  cxy  = 2.0 * gl_PointCoord - 1.0;
+    float r    = dot(cxy, cxy);
+    if (r > 1.0) discard;
+    // Tight bright core with a softer secondary ring for luminosity
+    float glow = exp(-r * 2.8) + exp(-r * 8.0) * 0.6;
+    gl_FragColor = vec4(uColor, vAlpha * glow);
+  }
+`;
+
+const trailMat = new THREE.ShaderMaterial({
+  uniforms:       { uColor: { value: new THREE.Color(0xc8e6ff) } },
+  vertexShader:   travelVS,
+  fragmentShader: travelFS,
+  transparent:    true,
+  depthWrite:     false,
+});
+
+const trailMesh = new THREE.Points(trailGeo, trailMat);
+trailMesh.renderOrder = 2;   // always on top of the point cloud
+globeGroup.add(trailMesh);
+
+// ── Glow halo — same geometry, wider Gaussian, renders behind the core ────────
+const glowVS = /* glsl */`
+  attribute float aAlpha;
+  attribute float aSize;
+  varying float   vAlpha;
+  void main() {
+    vAlpha       = aAlpha;
+    vec4 mvPos   = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = aSize * 3.5;
+    gl_Position  = projectionMatrix * mvPos;
+  }
+`;
+const glowFS = /* glsl */`
+  uniform vec3  uColor;
+  varying float vAlpha;
+  void main() {
+    vec2  cxy  = 2.0 * gl_PointCoord - 1.0;
+    float r    = dot(cxy, cxy);
+    if (r > 1.0) discard;
+    float halo   = exp(-r * 1.1);
+    gl_FragColor = vec4(uColor, vAlpha * halo * 0.16);
+  }
+`;
+const glowMat = new THREE.ShaderMaterial({
+  uniforms:       { uColor: { value: new THREE.Color(0x88bbff) } },
+  vertexShader:   glowVS,
+  fragmentShader: glowFS,
+  transparent:    true,
+  depthWrite:     false,
+});
+const glowMesh = new THREE.Points(trailGeo, glowMat); // shares the same buffer
+glowMesh.renderOrder = 1;
+globeGroup.add(glowMesh);
+
+// Reusable scratch vector (avoids allocations in the hot loop)
+const _perp = new THREE.Vector3();
+
+function updateTravelers() {
+  travelers.forEach((t, ti) => {
+    // ── Move: Euler step on sphere then renormalize ──
+    const newPos = t.pos.clone().addScaledVector(t.dir, t.speed).normalize();
+
+    // ── Parallel-transport direction onto the new tangent plane ──
+    const newDir = t.dir.clone()
+      .addScaledVector(newPos, -t.dir.dot(newPos))
+      .normalize();
+
+    // ── Geodesic steering: ramp up force as traveler closes in on target ──
+    const targetPos    = LANDING_SPOTS[t.target];
+    const distToTarget = newPos.distanceTo(targetPos);
+    const toTarget     = geodesicDir(newPos, targetPos);
+    // Gentle curve from far away, aggressive lock-on up close
+    const steerFactor  = Math.min(0.92, 0.018 / Math.max(distToTarget, 0.018));
+    newDir.lerp(toTarget, steerFactor).normalize();
+    newDir.addScaledVector(newPos, -newDir.dot(newPos)).normalize(); // re-project tangent
+
+    // ── Arrival: snap exactly onto the spot, then pick a new target ──
+    if (distToTarget < 0.025) {
+      newPos.copy(targetPos);   // land precisely on the beacon
+      let next = t.target;
+      while (next === t.target) next = Math.floor(Math.random() * LANDING_SPOTS.length);
+      const newTgt   = LANDING_SPOTS[next];
+      const newAngle = Math.acos(Math.min(1, Math.max(-1, newPos.dot(newTgt))));
+      t.target     = next;
+      t.dir        = geodesicDir(newPos, newTgt);
+      t.progress   = 0;
+      t.totalAngle = Math.max(0.01, newAngle);
+    } else {
+      t.dir = newDir;
+    }
+
+    // ── Arc: lift position above the surface based on journey progress ──
+    t.progress = Math.min(1.0, t.progress + t.speed / t.totalAngle);
+    const arcFactor = 1.0 + ARC_HEIGHT * Math.sin(t.progress * Math.PI);
+    const arcPos    = newPos.clone().multiplyScalar(arcFactor);
+
+    t.pos = newPos;
+    t.trail.unshift(arcPos);   // trail stores arc-adjusted positions
+    if (t.trail.length > TRAIL_LEN) t.trail.pop();
+
+    // ── Write into pre-allocated typed arrays ──
+    const base = ti * TRAIL_LEN;
+    for (let i = 0; i < TRAIL_LEN; i++) {
+      const bi = (base + i) * 3;
+      if (i < t.trail.length) {
+        const p  = t.trail[i];
+        tPositions[bi]     = p.x;
+        tPositions[bi + 1] = p.y;
+        tPositions[bi + 2] = p.z;
+        const frac         = 1.0 - i / t.trail.length;
+        tAlphas[base + i]  = frac * frac;
+        tSizes [base + i]  = i === 0 ? HEAD_SZ : TRAIL_SZ * frac;
+      } else {
+        tAlphas[base + i] = 0;
+        tSizes [base + i] = 0;
+      }
+    }
+  });
+
+  trailGeo.attributes.position.needsUpdate = true;
+  trailGeo.attributes.aAlpha.needsUpdate   = true;
+  trailGeo.attributes.aSize.needsUpdate    = true;
+}
+
+// ── Resize ────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+  bloomPass.resolution.set(window.innerWidth, window.innerHeight);
+});
+
+// ── Render loop ───────────────────────────────────────────────────────────────
+function animate() {
+  requestAnimationFrame(animate);
+  globeGroup.rotation.y += 0.0015;
+  updateTravelers();
+  spotMat.uniforms.uTime.value = performance.now() / 1000;
+  // Back light tracks camera — always behind the earth relative to the viewer
+  uniforms.uCameraDir.value.copy(camera.position).normalize();
+  controls.update();
+  composer.render();
+}
+
+animate();
+</script>
+</body>
+</html>

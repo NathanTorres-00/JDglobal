@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Urth V15 – Ribbon Sphere</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+    canvas { display: block; position: fixed; left: 0; }
+
+    #controls {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 100;
+      background: rgba(255, 255, 255, 0.88);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      border: 1px solid rgba(0,0,0,0.08);
+      border-radius: 14px;
+      padding: 18px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      font-family: 'Inter', system-ui, sans-serif;
+      font-size: 11px;
+      font-weight: 500;
+      color: #111;
+      min-width: 210px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.10);
+      user-select: none;
+    }
+    #controls h3 {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #666;
+      margin-bottom: 2px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 80px 1fr 36px;
+      align-items: center;
+      gap: 8px;
+    }
+    .row label { font-weight: 600; }
+    .row input[type=range] { accent-color: #111827; }
+    .row span {
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      color: #555;
+    }
+  </style>
+</head>
+<body>
+
+<div id="controls">
+  <h3>Matthew 28:18–20</h3>
+  <div class="row">
+    <label>Speed</label>
+    <input type="range" id="sSpeed"     min="0.05" max="3.0"  step="0.05" value="1.0">
+    <span id="vSpeed">1.0×</span>
+  </div>
+  <div class="row">
+    <label>Opacity</label>
+    <input type="range" id="sOpacity"   min="0.05" max="1.0"  step="0.05" value="0.85">
+    <span id="vOpacity">0.85</span>
+  </div>
+  <div class="row">
+    <label>Text Scale</label>
+    <input type="range" id="sTextScale" min="0.25" max="4.0"  step="0.05" value="1.0">
+    <span id="vTextScale">1.0×</span>
+  </div>
+  <div class="row">
+    <label>Ribbon H</label>
+    <input type="range" id="sRibbonH"   min="0.2"  max="3.0"  step="0.05" value="1.0">
+    <span id="vRibbonH">1.0×</span>
+  </div>
+  <div class="row">
+    <label>Sphere</label>
+    <input type="range" id="sSphere"    min="0.4"  max="2.0"  step="0.05" value="1.0">
+    <span id="vSphere">1.0×</span>
+  </div>
+  <div class="row">
+    <label>Spread</label>
+    <input type="range" id="sSpread"    min="0.1"  max="1.5"  step="0.05" value="1.0">
+    <span id="vSpread">1.0×</span>
+  </div>
+  <div class="row">
+    <label>Tilt</label>
+    <input type="range" id="sTilt"      min="-45"  max="45"   step="1"    value="0">
+    <span id="vTilt">0°</span>
+  </div>
+  <div class="row">
+    <label>Stroke</label>
+    <input type="range" id="sStroke"    min="0"    max="20"   step="1"    value="3">
+    <span id="vStroke">3px</span>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── Matthew 28:18-20 NKJV — one string per verse, stripped of punctuation ─────
+const VERSES = [
+  'And Jesus came and spoke to them saying All authority has been given to Me in heaven and on earth',
+  'Go therefore and make disciples of all the nations baptizing them in the name of the Father and of the Son and of the Holy Spirit',
+  'teaching them to observe all things that I have commanded you and lo I am with you always even to the end of the age Amen',
+].map(v => v.toUpperCase());
+
+// ── Configuration ──────────────────────────────────────────────────────────────
+const SPHERE_R      = 190;   // reference sphere radius (world units)
+const BASE_RIBBON_H =  35;   // ribbon height at ribbonH = 1.0 (world units)
+const FONT_PX       =  96;   // canvas font size (px) — generous for HiDPI sharpness
+const CANVAS_H      = 128;   // canvas height (px)
+const BASE_SPEED    = 0.14;  // angular scroll rate (rad/s) at speed = 1.0
+const BASE_CAM      = 430;   // initial camera distance
+
+// 13 latitude bands at ~12° spacing. Adjacent bands have opposite scroll dirs.
+const BANDS = [
+  { lat:  72, dir: +1, speed: 0.48 },
+  { lat:  60, dir: -1, speed: 0.60 },
+  { lat:  48, dir: +1, speed: 0.72 },
+  { lat:  36, dir: -1, speed: 0.82 },
+  { lat:  24, dir: +1, speed: 0.90 },
+  { lat:  12, dir: -1, speed: 0.95 },
+  { lat:   0, dir: +1, speed: 1.00 },
+  { lat: -12, dir: -1, speed: 0.95 },
+  { lat: -24, dir: +1, speed: 0.90 },
+  { lat: -36, dir: -1, speed: 0.82 },
+  { lat: -48, dir: +1, speed: 0.72 },
+  { lat: -60, dir: -1, speed: 0.60 },
+  { lat: -72, dir: +1, speed: 0.48 },
+];
+
+// ── Live parameters ────────────────────────────────────────────────────────────
+const params = {
+  speedMult:   1.0,
+  opacity:     0.85,
+  textScale:   1.0,
+  ribbonH:     1.0,
+  sphereScale: 1.0,
+  spread:      1.0,
+  tilt:        0,
+  strokeWidth: 3,
+};
+
+function wire(inputId, valueId, key, onchange) {
+  const inp = document.getElementById(inputId);
+  const out = document.getElementById(valueId);
+  inp.addEventListener('input', () => {
+    params[key] = parseFloat(inp.value);
+    out.textContent = key === 'opacity'     ? inp.value
+                    : key === 'tilt'        ? inp.value + '°'
+                    : key === 'strokeWidth' ? inp.value + 'px'
+                    : inp.value + '×';
+    onchange?.();
+  });
+}
+
+// ── Renderer ───────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ── Scene + Camera ─────────────────────────────────────────────────────────────
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 1, 6000);
+const PAD_Y  = 36;
+
+camera.position.set(0, 0, BASE_CAM);
+
+function onResize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  const hEff = h - 2 * PAD_Y;
+  camera.aspect = w / hEff;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, hEff);
+  renderer.domElement.style.top = PAD_Y + 'px';
+}
+onResize();
+window.addEventListener('resize', onResize);
+
+// ── OrbitControls — drag = orbit, scroll = zoom ────────────────────────────────
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.enablePan     = false;
+controls.minDistance   = 200;
+controls.maxDistance   = 1200;
+
+// ── Ribbon shaders ─────────────────────────────────────────────────────────────
+const ribbonVS = /* glsl */`
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const ribbonFS = /* glsl */`
+  uniform sampler2D uTex;
+  uniform float     uOpacity;
+  uniform float     uOffset;  // scroll position (0–1 = one full verse)
+  uniform float     uRepeat;  // = 1 / textScale; smaller = larger text
+  varying vec2 vUv;
+  void main() {
+    // Scroll the texture horizontally — wrapS = RepeatWrapping handles overflow
+    vec2 uv  = vec2(vUv.x * uRepeat + uOffset, vUv.y);
+    vec4 col = texture2D(uTex, uv);
+    // Feather top/bottom edges for a soft ribbon look
+    float fade = smoothstep(0.0, 0.15, vUv.y) * smoothstep(1.0, 0.85, vUv.y);
+    gl_FragColor = vec4(col.rgb, col.a * uOpacity * fade);
+  }
+`;
+
+// ── Globe group (holds all ribbons; tilt = group.rotation.x) ──────────────────
+const globeGroup = new THREE.Group();
+scene.add(globeGroup);
+
+const allRibbons = [];
+
+// ── Build ribbons once fonts are loaded ────────────────────────────────────────
+document.fonts.ready.then(() => {
+  const FONT = `600 ${FONT_PX}px 'Inter'`;
+  const SEP  = '   ·   ';  // separator appended for seamless tile join
+
+  // Build a CanvasTexture for one verse.
+  // Canvas width = measured verse + separator (one seamless tile).
+  // The shader handles tiling via uRepeat; wrapS=RepeatWrapping wraps naturally.
+  function buildRibbonTex(verseText) {
+    const fullText = verseText + SEP;
+    const tmp = document.createElement('canvas');
+    const tc  = tmp.getContext('2d');
+    tc.font   = FONT;
+    tmp.width  = Math.ceil(tc.measureText(fullText).width);
+    tmp.height = CANVAS_H;
+    tc.font         = FONT;
+    tc.textBaseline = 'middle';
+    if (params.strokeWidth > 0) {
+      tc.strokeStyle = 'rgba(0,0,0,0.85)';
+      tc.lineWidth   = params.strokeWidth * 2;  // centered on edge; *2 so half shows outside fill
+      tc.lineJoin    = 'round';
+      tc.strokeText(fullText, 0, CANVAS_H / 2);
+    }
+    tc.fillStyle = 'rgba(255,255,255,0.95)';
+    tc.fillText(fullText, 0, CANVAS_H / 2);
+    const tex = new THREE.CanvasTexture(tmp);
+    tex.wrapS      = THREE.RepeatWrapping;
+    tex.wrapT      = THREE.ClampToEdgeWrapping;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+
+  // 3 unique verse textures shared across the 13 bands (let — rebuilt when stroke changes)
+  let verseTex = VERSES.map(buildRibbonTex);
+
+  function rebuildTextures() {
+    verseTex.forEach(t => t.dispose());
+    verseTex = VERSES.map(buildRibbonTex);
+    allRibbons.forEach(({ mat }, i) => {
+      mat.uniforms.uTex.value = verseTex[i % VERSES.length];
+    });
+  }
+
+  // Unit cylinder: radius=1, height=1, open-ended, 128 segments for smooth circle.
+  // Per-frame: scale.x/z = ring radius, scale.y = ribbon height, position.y = latitude height.
+  const ribbonGeo = new THREE.CylinderGeometry(1, 1, 1, 128, 1, true);
+
+  BANDS.forEach((band, i) => {
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTex:     { value: verseTex[i % VERSES.length] },
+        uOpacity: { value: params.opacity },
+        uOffset:  { value: 0.0 },
+        uRepeat:  { value: 1.0 / params.textScale },
+      },
+      vertexShader:   ribbonVS,
+      fragmentShader: ribbonFS,
+      transparent:    true,
+      depthWrite:     false,
+      side:           THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(ribbonGeo, mat);
+    globeGroup.add(mesh);
+    allRibbons.push({ mesh, mat, band });
+  });
+
+  // Wire all sliders
+  wire('sSpeed',     'vSpeed',     'speedMult');
+  wire('sOpacity',   'vOpacity',   'opacity');
+  wire('sTextScale', 'vTextScale', 'textScale');
+  wire('sRibbonH',   'vRibbonH',   'ribbonH');
+  wire('sSphere',    'vSphere',    'sphereScale');
+  wire('sSpread',    'vSpread',    'spread');
+  wire('sTilt',      'vTilt',      'tilt');
+  wire('sStroke',    'vStroke',    'strokeWidth', rebuildTextures);
+
+  // ── Animation loop ───────────────────────────────────────────────────────────
+  const clock = new THREE.Clock();
+
+  function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    const dt = clock.getDelta();
+
+    // Tilt the entire globe by rotating the group around X
+    globeGroup.rotation.x = params.tilt * Math.PI / 180;
+
+    const R = SPHERE_R * params.sphereScale;
+
+    allRibbons.forEach(({ mesh, mat, band }) => {
+      // Spread scales latitude angles; clamped so ringR never goes negative
+      const lat_deg = Math.max(-85, Math.min(85, band.lat * params.spread));
+      const lat_rad = lat_deg * Math.PI / 180;
+      const ringR   = Math.max(5, R * Math.cos(lat_rad));
+      const yPos    =              R * Math.sin(lat_rad);
+
+      // Scale the unit cylinder to this latitude ring
+      mesh.scale.x    = mesh.scale.z = ringR;
+      mesh.scale.y    = BASE_RIBBON_H * params.ribbonH;
+      mesh.position.y = yPos;
+
+      // Per-frame uniforms
+      mat.uniforms.uOpacity.value = params.opacity;
+      mat.uniforms.uRepeat.value  = 1.0 / params.textScale;
+
+      // Advance scroll offset.
+      // Rate: BASE_SPEED rad/s → 1/(2π) texture units per radian → seamless orbit sync.
+      mat.uniforms.uOffset.value +=
+        dt * BASE_SPEED * band.dir * band.speed * params.speedMult / (2 * Math.PI);
+    });
+
+    renderer.render(scene, camera);
+  }
+  animate();
+});
+</script>
+</body>
+</html>

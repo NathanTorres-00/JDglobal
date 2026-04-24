@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Urth V14 – Typography Sphere</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+    canvas { display: block; position: fixed; left: 0; }
+
+    #controls {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 100;
+      background: rgba(255, 255, 255, 0.88);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      border: 1px solid rgba(0,0,0,0.08);
+      border-radius: 14px;
+      padding: 18px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      font-family: 'Inter', system-ui, sans-serif;
+      font-size: 11px;
+      font-weight: 500;
+      color: #111;
+      min-width: 210px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.10);
+      user-select: none;
+    }
+    #controls h3 {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #666;
+      margin-bottom: 2px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 80px 1fr 36px;
+      align-items: center;
+      gap: 8px;
+    }
+    .row label { font-weight: 600; }
+    .row input[type=range] { accent-color: #111827; }
+    .row span {
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      color: #555;
+    }
+  </style>
+</head>
+<body>
+
+<div id="controls">
+  <h3>Matthew 28:18–20</h3>
+  <div class="row">
+    <label>Font Size</label>
+    <input type="range" id="sSize"    min="0.4" max="2.2" step="0.05" value="1.0">
+    <span id="vSize">1.0×</span>
+  </div>
+  <div class="row">
+    <label>Speed</label>
+    <input type="range" id="sSpeed"   min="0.05" max="3.0" step="0.05" value="1.0">
+    <span id="vSpeed">1.0×</span>
+  </div>
+  <div class="row">
+    <label>Opacity</label>
+    <input type="range" id="sOpacity" min="0.05" max="1.0" step="0.05" value="0.85">
+    <span id="vOpacity">0.85</span>
+  </div>
+  <div class="row">
+    <label>Tilt</label>
+    <input type="range" id="sTilt"    min="-45" max="45" step="1" value="0">
+    <span id="vTilt">0°</span>
+  </div>
+  <div class="row">
+    <label>Depth</label>
+    <input type="range" id="sDepth"   min="0" max="2" step="0.05" value="1.0">
+    <span id="vDepth">1.0×</span>
+  </div>
+  <div class="row">
+    <label>Sphere</label>
+    <input type="range" id="sSphere"  min="0.4" max="2.0" step="0.05" value="1.0">
+    <span id="vSphere">1.0×</span>
+  </div>
+  <div class="row">
+    <label>Spread</label>
+    <input type="range" id="sSpread"  min="0.1" max="2.0" step="0.05" value="1.0">
+    <span id="vSpread">1.0×</span>
+  </div>
+  <h3 style="margin-top:4px">Modulation</h3>
+  <div class="row">
+    <label>Frequency</label>
+    <input type="range" id="sWaveFreq"    min="0" max="8"  step="0.5"  value="2">
+    <span id="vWaveFreq">2×</span>
+  </div>
+  <div class="row">
+    <label>W. Speed</label>
+    <input type="range" id="sWaveSpeed"   min="0" max="3"  step="0.05" value="0.5">
+    <span id="vWaveSpeed">0.5×</span>
+  </div>
+  <div class="row">
+    <label>W2 Freq</label>
+    <input type="range" id="sWave2Freq"   min="0" max="8"  step="0.5"  value="3">
+    <span id="vWave2Freq">3×</span>
+  </div>
+  <div class="row">
+    <label>W2 Speed</label>
+    <input type="range" id="sWave2Speed"  min="0" max="3"  step="0.05" value="0.8">
+    <span id="vWave2Speed">0.8×</span>
+  </div>
+  <div class="row">
+    <label>Mix</label>
+    <input type="range" id="sWaveMix"     min="0" max="1"  step="0.05" value="0">
+    <span id="vWaveMix">0×</span>
+  </div>
+  <div class="row">
+    <label>Y Wobble</label>
+    <input type="range" id="sYWobble"     min="0" max="1"  step="0.05" value="0">
+    <span id="vYWobble">0×</span>
+  </div>
+  <div class="row">
+    <label>Pulse</label>
+    <input type="range" id="sScalePulse"  min="0" max="1"  step="0.05" value="0">
+    <span id="vScalePulse">0×</span>
+  </div>
+  <div class="row">
+    <label>Fade</label>
+    <input type="range" id="sFadeWave"    min="0" max="1"  step="0.05" value="0">
+    <span id="vFadeWave">0×</span>
+  </div>
+  <div class="row">
+    <label>Radial</label>
+    <input type="range" id="sRadialWave"  min="0" max="1"  step="0.05" value="0">
+    <span id="vRadialWave">0×</span>
+  </div>
+  <div class="row">
+    <label>Path</label>
+    <input type="range" id="sPathWave"    min="0" max="30" step="1"    value="0">
+    <span id="vPathWave">0°</span>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── Matthew 28:18-20 NKJV — one array per verse, stripped of punctuation ──────
+const VERSES = [
+  'And Jesus came and spoke to them saying All authority has been given to Me in heaven and on earth',
+  'Go therefore and make disciples of all the nations baptizing them in the name of the Father and of the Son and of the Holy Spirit',
+  'teaching them to observe all things that I have commanded you and lo I am with you always even to the end of the age Amen',
+].map(v => v.toUpperCase().split(/\s+/));
+
+// ── Configuration ─────────────────────────────────────────────────────────────
+const SPHERE_R  = 190;
+const CARD_H    = 24;   // world-unit height of each word card
+const FONT_PX   = 40;   // canvas reference font size (px) — larger = sharper on HiDPI
+const FONT_PADX = 10;   // horizontal canvas padding
+const FONT_PADY =  8;   // vertical canvas padding
+const BASE_SPEED = 0.14; // rad/s for speed=1 bands
+const BASE_CAM   = 430;  // baseline camera distance
+
+// 13 bands at ~12° spacing. Each band carries one verse (VERSES[i % 3]).
+// Direction strictly alternates N→S so every adjacent pair orbits opposite.
+const BANDS = [
+  { lat:  72, dir: +1, speed: 0.48 },
+  { lat:  60, dir: -1, speed: 0.60 },
+  { lat:  48, dir: +1, speed: 0.72 },
+  { lat:  36, dir: -1, speed: 0.82 },
+  { lat:  24, dir: +1, speed: 0.90 },
+  { lat:  12, dir: -1, speed: 0.95 },
+  { lat:   0, dir: +1, speed: 1.00 },
+  { lat: -12, dir: -1, speed: 0.95 },
+  { lat: -24, dir: +1, speed: 0.90 },
+  { lat: -36, dir: -1, speed: 0.82 },
+  { lat: -48, dir: +1, speed: 0.72 },
+  { lat: -60, dir: -1, speed: 0.60 },
+  { lat: -72, dir: +1, speed: 0.48 },
+];
+
+// ── Live parameters (driven by sliders) ───────────────────────────────────────
+const params = {
+  fontScale: 1.0, speedMult: 1.0, opacity: 0.85, tilt: 0,
+  depth: 1.0, sphereScale: 1.0, spread: 1.0,
+  // modulation
+  waveFreq: 2, waveSpeed: 0.5,
+  wave2Freq: 3, wave2Speed: 0.8, waveMix: 0,
+  yWobble: 0, scalePulse: 0, fadeWave: 0, radialWave: 0, pathWave: 0,
+};
+
+function wire(inputId, valueId, key, onchange) {
+  const inp = document.getElementById(inputId);
+  const out = document.getElementById(valueId);
+  inp.addEventListener('input', () => {
+    params[key] = parseFloat(inp.value);
+    out.textContent = (key === 'opacity')                     ? inp.value
+                    : (key === 'tilt' || key === 'pathWave') ? inp.value + '°'
+                    : inp.value + '×';
+    onchange?.();
+  });
+}
+
+// ── Renderer ──────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+// ── Camera ────────────────────────────────────────────────────────────────────
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 1, 6000);
+const PAD_Y  = 36;
+
+// Set initial camera position once; OrbitControls owns it after that.
+camera.position.set(0, 0, BASE_CAM);
+
+function onResize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  const hEff = h - 2 * PAD_Y;
+  camera.aspect = w / hEff;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, hEff);
+  renderer.domElement.style.top = PAD_Y + 'px';
+}
+onResize();
+window.addEventListener('resize', onResize);
+
+// ── Orbit controls (mouse drag = orbit, scroll = zoom) ────────────────────────
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping  = true;
+controls.dampingFactor  = 0.06;
+controls.enablePan      = false;
+controls.minDistance    = 150;
+controls.maxDistance    = 1200;
+
+// ── Card shaders ──────────────────────────────────────────────────────────────
+const wordVS = /* glsl */`
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+const wordFS = /* glsl */`
+  uniform sampler2D uTex;
+  uniform float     uOpacity;
+  varying vec2 vUv;
+  void main() {
+    vec4 col = texture2D(uTex, vUv);
+    // Soft feather at left/right edges so words flow naturally into each other
+    float fade = smoothstep(0.0, 0.08, vUv.x) * smoothstep(1.0, 0.92, vUv.x);
+    gl_FragColor = vec4(col.rgb, col.a * uOpacity * fade);
+  }
+`;
+
+// ── Build scene once fonts are loaded ─────────────────────────────────────────
+const allCards = [];
+const _proj    = new THREE.Vector3();
+
+document.fonts.ready.then(() => {
+
+  // Build a texture cache keyed by word string (unique words only, shared across bands).
+  function makeWordTex(word) {
+    const tmp = document.createElement('canvas');
+    const tc  = tmp.getContext('2d');
+    tc.font   = `600 ${FONT_PX}px 'Inter'`;
+    const w   = Math.ceil(tc.measureText(word).width);
+    tmp.width  = w + FONT_PADX * 2;
+    tmp.height = FONT_PX + FONT_PADY * 2;
+    tc.font         = `600 ${FONT_PX}px 'Inter'`;
+    tc.fillStyle    = '#111827';
+    tc.textBaseline = 'top';
+    tc.fillText(word, FONT_PADX, FONT_PADY);
+    const tex = new THREE.CanvasTexture(tmp);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return { tex, aspect: tmp.width / tmp.height };
+  }
+
+  const texCache = new Map();
+  VERSES.flat().forEach(word => {
+    if (!texCache.has(word)) texCache.set(word, makeWordTex(word));
+  });
+
+  // Each band gets one verse; words are evenly distributed around the orbit.
+  BANDS.forEach((band, bandIdx) => {
+    band.phase0 = Math.random() * Math.PI * 2;
+    const words = VERSES[bandIdx % VERSES.length];
+    words.forEach((word, j) => {
+      const wt     = texCache.get(word);
+      const worldW = CARD_H * wt.aspect;
+
+      const uni = {
+        uTex:     { value: wt.tex },
+        uOpacity: { value: params.opacity },
+      };
+
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(worldW, CARD_H),
+        new THREE.ShaderMaterial({
+          uniforms:       uni,
+          vertexShader:   wordVS,
+          fragmentShader: wordFS,
+          transparent:    true,
+          depthWrite:     false,
+        })
+      );
+      scene.add(mesh);
+      allCards.push({ mesh, uni, band, posInBand: j, totalInBand: words.length });
+    });
+  });
+
+  // Wire all sliders — opacity is set per-card per-frame in animate, no callback needed
+  wire('sOpacity',    'vOpacity',    'opacity');
+  wire('sSize',       'vSize',       'fontScale');
+  wire('sSpeed',      'vSpeed',      'speedMult');
+  wire('sTilt',       'vTilt',       'tilt');
+  wire('sDepth',      'vDepth',      'depth');
+  wire('sSphere',     'vSphere',     'sphereScale');
+  wire('sSpread',     'vSpread',     'spread');
+  wire('sWaveFreq',   'vWaveFreq',   'waveFreq');
+  wire('sWaveSpeed',  'vWaveSpeed',  'waveSpeed');
+  wire('sWave2Freq',  'vWave2Freq',  'wave2Freq');
+  wire('sWave2Speed', 'vWave2Speed', 'wave2Speed');
+  wire('sWaveMix',    'vWaveMix',    'waveMix');
+  wire('sYWobble',    'vYWobble',    'yWobble');
+  wire('sScalePulse', 'vScalePulse', 'scalePulse');
+  wire('sFadeWave',   'vFadeWave',   'fadeWave');
+  wire('sRadialWave', 'vRadialWave', 'radialWave');
+  wire('sPathWave',   'vPathWave',   'pathWave');
+
+  // ── Animate ─────────────────────────────────────────────────────────────────
+  const clock = new THREE.Clock();
+
+  function animate() {
+    requestAnimationFrame(animate);
+    controls.update();  // damping requires per-frame tick
+    const t = clock.getElapsedTime();
+
+    // Tilt: rotate the sphere around X each frame from params
+    const tiltRad = params.tilt * Math.PI / 180;
+    const cosT = Math.cos(tiltRad), sinT = Math.sin(tiltRad);
+
+    const R = SPHERE_R * params.sphereScale;
+
+    allCards.forEach(({ mesh, uni, band, posInBand, totalInBand }) => {
+      const lat_rad = band.lat * params.spread * Math.PI / 180;
+
+      const phase = band.phase0 + t * BASE_SPEED * band.dir * band.speed * params.speedMult;
+      const lon   = phase + (posInBand / totalInBand) * Math.PI * 2;
+
+      // ── Two independent waves — add them for interference / beating ─────────
+      const wave1 = Math.sin(lon * params.waveFreq  + t * params.waveSpeed);
+      const wave2 = Math.sin(lon * params.wave2Freq + t * params.wave2Speed);
+      const wave  = wave1 + wave2 * params.waveMix;
+
+      // Path wave: bend the orbit line into a sine curve on the sphere surface
+      const lat_eff = lat_rad + wave * params.pathWave * Math.PI / 180;
+      const cosLat  = Math.cos(lat_eff);
+      const sinLat  = Math.sin(lat_eff);
+
+      // Radial wave: sphere surface breathes in/out
+      const R_word = R * (1 + wave * params.radialWave * 0.5);
+
+      // Spherical → Cartesian, with Y wobble applied pre-tilt
+      const x0 = R_word * cosLat * Math.sin(lon);
+      const y0 = R_word * sinLat + wave * params.yWobble * R * 0.25;
+      const z0 = R_word * cosLat * Math.cos(lon);
+
+      // Apply X-axis tilt rotation
+      const x = x0;
+      const y = y0 * cosT - z0 * sinT;
+      const z = y0 * sinT + z0 * cosT;
+
+      mesh.position.set(x, y, z);
+      mesh.lookAt(camera.position);
+
+      // Depth scale + scale pulse
+      _proj.set(x, y, z).project(camera);
+      const depth     = (_proj.z + 1.0) * 0.5;
+      const hi        = 1.0 + 0.20 * params.depth;
+      const lo        = 1.0 - 0.20 * params.depth;
+      const pulseMod  = 1 + wave * params.scalePulse * 0.5;
+      mesh.scale.setScalar(Math.max(0.05, THREE.MathUtils.lerp(hi, lo, depth) * params.fontScale * pulseMod));
+
+      // Opacity fade wave (set per-card per-frame)
+      uni.uOpacity.value = Math.max(0.02, params.opacity * (1 + wave * params.fadeWave * 0.9));
+    });
+
+    renderer.render(scene, camera);
+  }
+  animate();
+});
+</script>
+</body>
+</html>

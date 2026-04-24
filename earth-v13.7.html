@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Urth V13.7 – Inside Sphere Brick</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%; overflow: hidden; background: transparent;
+      touch-action: none;
+      overscroll-behavior: none;
+      pointer-events: none;
+    }
+    canvas {
+      display: block;
+      transform: translateZ(0);
+      will-change: transform;
+      pointer-events: none;
+      touch-action: none;
+    }
+  </style>
+</head>
+<body>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── Config ────────────────────────────────────────────────────────────────────
+const SPHERE_R     = 300;
+const CARD_W       = 110;
+const CARD_H       = 62;
+const ROTATE_SPEED = 0.08;
+
+const ROWS = [
+  { lat:  15, count: 12, brick: 0 },
+  { lat:  32, count: 10, brick: 1 },
+  { lat:  50, count:  8, brick: 0 },
+  { lat: -15, count: 12, brick: 1 },
+  { lat: -32, count: 10, brick: 0 },
+  { lat: -50, count:  8, brick: 1 },
+];
+
+const IMAGES = [
+  '/images/house-church-1.jpg',
+  '/images/house-church-2.jpg',
+  '/images/house-church-3.jpg',
+  '/images/house-church-4.jpg',
+  '/images/house-church.jpg',
+  '/images/baptism-1.jpg',
+  '/images/dr-lin-baptism.png',
+  '/images/imags-archive-3.png',
+  '/images/nano-baptism.png',
+  '/images/image-14-1.jpeg',
+];
+const ATLAS_COLS = 5, ATLAS_ROWS = 2, IMG_W = 320, IMG_H = 180;
+const TOTAL_SLOTS = ATLAS_COLS * ATLAS_ROWS;
+
+// ── Atlas (color curve baked in here so the shader doesn't do it per pixel) ──
+const atlasCanvas = document.createElement('canvas');
+atlasCanvas.width  = ATLAS_COLS * IMG_W;
+atlasCanvas.height = ATLAS_ROWS * IMG_H;
+const atx = atlasCanvas.getContext('2d');
+atx.fillStyle = '#111';
+atx.fillRect(0, 0, atlasCanvas.width, atlasCanvas.height);
+
+const atlas = new THREE.CanvasTexture(atlasCanvas);
+atlas.colorSpace = THREE.SRGBColorSpace;
+atlas.flipY = false;
+
+// Precomputed lookup for pow(x/255, 0.55) * 1.15 * 255, clamped 0..255
+const GAMMA_LUT = new Uint8ClampedArray(256);
+for (let v = 0; v < 256; v++) {
+  GAMMA_LUT[v] = Math.min(255, Math.pow(v / 255, 0.55) * 1.15 * 255);
+}
+
+function drawCoverAndAdjust(ctx, img, dx, dy, dw, dh) {
+  const imgAspect = img.naturalWidth / img.naturalHeight;
+  const dstAspect = dw / dh;
+  let sx, sy, sw, sh;
+  if (imgAspect > dstAspect) {
+    sh = img.naturalHeight; sw = sh * dstAspect;
+    sx = (img.naturalWidth - sw) / 2; sy = 0;
+  } else {
+    sw = img.naturalWidth; sh = sw / dstAspect;
+    sx = 0; sy = (img.naturalHeight - sh) / 2;
+  }
+  ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+
+  // Bake the tone curve (formerly `pow(col.rgb, 0.55) * 1.15` in the shader)
+  const data = ctx.getImageData(dx, dy, dw, dh);
+  const p = data.data;
+  for (let i = 0; i < p.length; i += 4) {
+    p[i]     = GAMMA_LUT[p[i]];
+    p[i + 1] = GAMMA_LUT[p[i + 1]];
+    p[i + 2] = GAMMA_LUT[p[i + 2]];
+  }
+  ctx.putImageData(data, dx, dy);
+}
+
+for (let i = 0; i < TOTAL_SLOTS; i++) {
+  const col = i % ATLAS_COLS, row = Math.floor(i / ATLAS_COLS);
+  const img = new Image();
+  img.onload = () => { drawCoverAndAdjust(atx, img, col * IMG_W, row * IMG_H, IMG_W, IMG_H); atlas.needsUpdate = true; };
+  img.src = IMAGES[i % IMAGES.length];
+}
+
+// ── Renderer / Scene / Camera ─────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({
+  antialias: false, alpha: true, powerPreference: 'high-performance',
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+atlas.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, 1, 1, 6000);
+camera.position.set(0, 0, 0);
+camera.lookAt(0, 0, 1);
+
+function fitCamera() {
+  const w = window.innerWidth, h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+fitCamera();
+window.addEventListener('resize', fitCamera);
+
+// ── Card shader (instanced) ───────────────────────────────────────────────────
+const cardVS = `
+  attribute float iPhotoIdx;
+  attribute float iReady;
+  varying vec2  vUv;
+  varying float vPhotoIdx;
+  varying float vReady;
+  void main() {
+    vUv        = uv;
+    vPhotoIdx  = iPhotoIdx;
+    vReady     = iReady;
+    gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+  }
+`;
+const cardFS = `
+  uniform sampler2D uAtlas;
+  varying vec2  vUv;
+  varying float vPhotoIdx;
+  varying float vReady;
+  const float COLS = 5.0;
+  const float ROWS = 2.0;
+  void main() {
+    const float ASPECT = 16.0 / 9.0;
+    vec2  p = vUv * 2.0 - 1.0;
+    p.x *= ASPECT;
+    float r = 0.20;
+    vec2  q = abs(p) - vec2(ASPECT, 1.0) + r;
+    float d = length(max(q, 0.0)) - r;
+    float tol = 0.025;
+    if (d > tol) discard;
+    float edge = 1.0 - smoothstep(-tol, tol, d);
+
+    float aCol = mod(vPhotoIdx, COLS);
+    float aRow = floor(vPhotoIdx / COLS);
+    vec2 uv = vec2(
+      (aCol + vUv.x) / COLS,
+      (aRow + (1.0 - vUv.y)) / ROWS
+    );
+    vec4 col = texture2D(uAtlas, uv);
+
+    float bw = 0.12;
+    float border = step(-bw, d) * (1.0 - step(0.0, d));
+    col.rgb = mix(col.rgb, vec3(0.90, 0.95, 1.0), border * 0.18);
+
+    gl_FragColor = vec4(col.rgb, col.a * edge * vReady);
+  }
+`;
+
+// ── Globe group ───────────────────────────────────────────────────────────────
+const globeGroup = new THREE.Group();
+scene.add(globeGroup);
+
+// ── Single pass over ROWS: build per-card descriptor (everything we need for
+// neighbor math, photo assignment, and instance matrices).
+const cards = [];
+ROWS.forEach(row => {
+  const latR   = row.lat * Math.PI / 180;
+  const cosLat = Math.cos(latR), sinLat = Math.sin(latR);
+  const angStep  = (Math.PI * 2) / row.count;
+  const brickOff = row.brick ? angStep * 0.5 : 0;
+  for (let j = 0; j < row.count; j++) {
+    const lonR = brickOff + j * angStep;
+    const cosLon = Math.cos(lonR), sinLon = Math.sin(lonR);
+    cards.push({
+      ux: cosLat * sinLon, uy: sinLat, uz: cosLat * cosLon,
+      cosLat, sinLat, cosLon, sinLon,
+    });
+  }
+});
+const CARD_COUNT = cards.length;
+
+// ── Photo assignment: no duplicate within ~40° on the sphere ──────────────────
+const NEIGHBOR_COS = Math.cos(40 * Math.PI / 180);
+const neighbors = cards.map((a, i) => {
+  const n = [];
+  cards.forEach((b, k) => {
+    if (k !== i && a.ux*b.ux + a.uy*b.uy + a.uz*b.uz > NEIGHBOR_COS) n.push(k);
+  });
+  return n;
+});
+
+const NUM_UNIQUE = IMAGES.length;
+function tryAssign() {
+  const out = new Array(CARD_COUNT).fill(-1);
+  const order = [...out.keys()].sort(() => Math.random() - 0.5);
+  for (const i of order) {
+    const banned = new Set();
+    neighbors[i].forEach(n => { if (out[n] >= 0) banned.add(out[n]); });
+    const opts = [];
+    for (let p = 0; p < NUM_UNIQUE; p++) if (!banned.has(p)) opts.push(p);
+    if (!opts.length) return null;
+    out[i] = opts[Math.floor(Math.random() * opts.length)];
+  }
+  return out;
+}
+let assignment = null;
+for (let t = 0; t < 200 && !assignment; t++) assignment = tryAssign();
+if (!assignment) assignment = cards.map((_, i) => i % NUM_UNIQUE);
+
+// ── Build one InstancedMesh for all cards ─────────────────────────────────────
+const planeGeom = new THREE.PlaneGeometry(CARD_W, CARD_H);
+
+const iPhotoIdx = new Float32Array(CARD_COUNT);
+const iReady    = new Float32Array(CARD_COUNT);
+const photoAttr = new THREE.InstancedBufferAttribute(iPhotoIdx, 1);
+const readyAttr = new THREE.InstancedBufferAttribute(iReady,    1);
+readyAttr.setUsage(THREE.DynamicDrawUsage);
+planeGeom.setAttribute('iPhotoIdx', photoAttr);
+planeGeom.setAttribute('iReady',    readyAttr);
+
+const cardMat = new THREE.ShaderMaterial({
+  uniforms:       { uAtlas: { value: atlas } },
+  vertexShader:   cardVS,
+  fragmentShader: cardFS,
+  transparent:    true,
+  depthWrite:     false,
+});
+
+const instanced = new THREE.InstancedMesh(planeGeom, cardMat, CARD_COUNT);
+instanced.frustumCulled = false;
+globeGroup.add(instanced);
+
+const _m   = new THREE.Matrix4();
+const _pos = new THREE.Vector3();
+const _east   = new THREE.Vector3();
+const _north  = new THREE.Vector3();
+const _inward = new THREE.Vector3();
+for (let i = 0; i < CARD_COUNT; i++) {
+  const c = cards[i];
+  _pos.set(SPHERE_R * c.ux, SPHERE_R * c.uy, SPHERE_R * c.uz);
+
+  // Inward-facing basis (−east, north, −normal) — right-handed,
+  // so card texture isn't mirrored when viewed from sphere center.
+  _east.set(-c.cosLon, 0, c.sinLon); // already negated east
+  _north.set(-c.sinLat * c.sinLon, c.cosLat, -c.sinLat * c.cosLon);
+  _inward.set(-c.ux, -c.uy, -c.uz);
+
+  _m.makeBasis(_east, _north, _inward).setPosition(_pos);
+  instanced.setMatrixAt(i, _m);
+
+  iPhotoIdx[i] = assignment[i];
+  iReady[i]    = 0.0;
+}
+instanced.instanceMatrix.needsUpdate = true;
+photoAttr.needsUpdate = true;
+
+// ── Visibility gate: only `visibilitychange` — iframe-internal IntersectionObserver
+// wouldn't fire when the parent page scrolls the iframe off-screen anyway.
+let tabVisible = document.visibilityState === 'visible';
+document.addEventListener('visibilitychange', () => {
+  tabVisible = document.visibilityState === 'visible';
+});
+
+// ── Animate (30 fps cap) ──────────────────────────────────────────────────────
+const TARGET_DT  = 1 / 30;
+let rotationY    = 0;
+let fadeActive   = true;
+let last         = performance.now() / 1000;
+let frameAccum   = 0;
+
+renderer.setAnimationLoop(() => {
+  const now = performance.now() / 1000;
+  const dt  = Math.min(0.1, now - last);
+  last = now;
+
+  if (!tabVisible) return;
+
+  frameAccum += dt;
+  if (frameAccum < TARGET_DT) return;
+  const step = frameAccum;
+  frameAccum = 0;
+
+  if (fadeActive) {
+    const fadeStep = step * 1.08;
+    let done = true;
+    for (let i = 0; i < CARD_COUNT; i++) {
+      if (iReady[i] < 1.0) {
+        iReady[i] = Math.min(1.0, iReady[i] + fadeStep);
+        if (iReady[i] < 1.0) done = false;
+      }
+    }
+    readyAttr.needsUpdate = true;
+    if (done) fadeActive = false;
+  }
+
+  rotationY += step * ROTATE_SPEED;
+  globeGroup.rotation.y = rotationY;
+
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

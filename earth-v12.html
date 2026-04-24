@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Urth V12 – Photo Panels</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+    canvas { display: block; position: fixed; left: 0; }
+  </style>
+</head>
+<body>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── 12 photos → packed into a 4×3 texture atlas ───────────────────────────────
+const PHOTOS = [
+  { kw: 'new york city skyline',       sig: 1  },
+  { kw: 'paris eiffel tower night',    sig: 2  },
+  { kw: 'tokyo japan street',          sig: 3  },
+  { kw: 'london tower bridge',         sig: 4  },
+  { kw: 'sydney opera house',          sig: 5  },
+  { kw: 'dubai city skyline',          sig: 6  },
+  { kw: 'rio de janeiro carnival',     sig: 7  },
+  { kw: 'african savanna elephants',   sig: 8  },
+  { kw: 'himalaya mountain peak',      sig: 9  },
+  { kw: 'venice italy canal gondola',  sig: 10 },
+  { kw: 'santorini greece sunset',     sig: 11 },
+  { kw: 'machu picchu peru ruins',     sig: 12 },
+];
+
+const COLS = 4, ROWS = 3, IW = 320, IH = 180;
+
+const atlasCanvas = document.createElement('canvas');
+atlasCanvas.width  = COLS * IW;  // 1280
+atlasCanvas.height = ROWS * IH;  // 540
+const atx = atlasCanvas.getContext('2d');
+atx.fillStyle = '#0a0a0a';
+atx.fillRect(0, 0, atlasCanvas.width, atlasCanvas.height);
+
+const atlas = new THREE.CanvasTexture(atlasCanvas);
+atlas.colorSpace = THREE.SRGBColorSpace;
+atlas.flipY = false;  // we handle Y orientation in the shader
+
+PHOTOS.forEach(({ kw, sig }, i) => {
+  const col = i % COLS, row = Math.floor(i / COLS);
+  const load = src => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      atx.drawImage(img, col * IW, row * IH, IW, IH);
+      atlas.needsUpdate = true;
+    };
+    img.onerror = () => {
+      if (src.includes('unsplash'))
+        load(`https://picsum.photos/seed/${sig * 17 + 5}/${IW}/${IH}`);
+    };
+    img.src = src;
+  };
+  load(`https://source.unsplash.com/${IW}x${IH}/?${encodeURIComponent(kw)}&sig=${sig}`);
+});
+
+// ── Renderer ──────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+const PAD_Y = 36;
+const uResolution = new THREE.Vector2();
+
+function onResize() {
+  const w = window.innerWidth, h = window.innerHeight - 2 * PAD_Y;
+  renderer.setSize(w, h);
+  renderer.domElement.style.top = PAD_Y + 'px';
+  uResolution.set(w, h);
+}
+window.addEventListener('resize', onResize);
+
+// ── Fullscreen quad (orthographic) ────────────────────────────────────────────
+const scene  = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+const uniforms = {
+  uAtlas:      { value: atlas },
+  uTime:       { value: 0.0 },
+  uResolution: { value: uResolution },
+};
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  transparent: true,
+  depthWrite:  false,
+
+  vertexShader: /* glsl */`
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+
+  fragmentShader: /* glsl */`
+    uniform sampler2D uAtlas;
+    uniform float     uTime;
+    uniform vec2      uResolution;
+    varying vec2 vUv;
+
+    // Atlas layout
+    const float COLS  = 4.0;
+    const float ROWS  = 3.0;
+    const float TOTAL = 12.0;
+
+    // Panel feel — matches ColorPanels reference
+    const float SPEED   = 0.18;   // sweep speed
+    const float DENSITY = 1.8;    // panels visible across screen
+    const float ANGLE   = 1.955;  // band sweep axis (~112° → bands tilt like reference)
+    const float GAP     = 0.18;   // fraction of each band slot that is transparent
+    const float BLUR    = 0.28;   // soft edge feather (fraction of visible band)
+
+    void main() {
+      // Aspect-correct centred coords
+      float aspect = uResolution.x / uResolution.y;
+      vec2 p = (vUv - 0.5) * vec2(aspect, 1.0);
+
+      // Project onto sweep axis → gives position along the direction panels travel
+      float sweep = cos(ANGLE) * p.x + sin(ANGLE) * p.y;
+
+      // Continuous band position
+      float t     = sweep * DENSITY - uTime * SPEED;
+      float bandI = floor(t);
+      float local = fract(t);  // 0..1 within this band slot
+
+      // Transparent gap either side of each panel
+      float gH = GAP * 0.5;
+      if (local < gH || local > 1.0 - gH) discard;
+
+      // Remap to 0..1 within the visible portion and feather edges
+      float vis  = (local - gH) / (1.0 - GAP);
+      float edge = smoothstep(0.0, BLUR, vis) * smoothstep(1.0, 1.0 - BLUR, vis);
+
+      // Which photo (cycles through all 12)
+      float idx  = mod(bandI, TOTAL);
+      float aCol = mod(idx, COLS);
+      float aRow = floor(idx / COLS);
+
+      // Sample atlas — each photo is shown at full-viewport scale within its band
+      // flipY=false: atlas.y=0 → top of canvas → top of image → shown at top of screen
+      vec2 uv = vec2(
+        (aCol + vUv.x) / COLS,
+        (aRow + (1.0 - vUv.y)) / ROWS
+      );
+
+      vec4 col = texture2D(uAtlas, uv);
+      gl_FragColor = vec4(col.rgb, edge);
+    }
+  `,
+});
+
+scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat));
+
+// ── Animate ───────────────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+(function animate() {
+  requestAnimationFrame(animate);
+  uniforms.uTime.value = clock.getElapsedTime();
+  renderer.render(scene, camera);
+})();
+
+onResize();
+</script>
+</body>
+</html>

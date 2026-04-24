@@ -1,0 +1,544 @@
+Hi, I'm Bobby. I'm a software engineer,
+
+
+creative developer, and former visual
+
+
+effects artist. Let's build something
+
+
+cool. [music]
+
+
+This is an updated version of a classic
+
+
+3JS Earth project using TSL with higher
+
+
+fidelity atmosphere, better day and
+
+
+night blending, fewer textures, and more
+
+
+room for extra effects.
+
+
+Since we're doing it with TSL, we get
+
+
+shader level control without writing a
+
+
+bunch of raw GLSL or WGSL. Instead, TSL,
+
+
+the 3JS shading language, is flexible,
+
+
+easy to get started with, and scales
+
+
+really well. It still lacks full
+
+
+documentation, but it's improving with
+
+
+every release.
+
+
+So, let's start from my web GPU template
+
+
+available on my GitHub link in the
+
+
+description. It gives you a scene,
+
+
+camera, renderer, and a few other things
+
+
+right out of the box.
+
+
+Let's get started by adding the sun and
+
+
+the stars.
+
+
+We'll use a directional light, which is
+
+
+basically a light that shoots into
+
+
+infinity, which simulates the sun's
+
+
+light really well.
+
+
+Let's move it back in space a little
+
+
+bit.
+
+
+We'll remove the gradient background,
+
+
+define the background as black, and add
+
+
+a star field with, I don't know, as many
+
+
+stars as you want, maybe 3,000 stars.
+
+
+This is one of the big performance wins
+
+
+using TSL and web GPU. Previously, I
+
+
+rendered the stars all as individual
+
+
+points on the CPU.
+
+
+Using the GPU is much, much more
+
+
+performant. For more details on how the
+
+
+stars were created, check out this
+
+
+video, stars animation. Okay, let's
+
+
+replace the Taurus knot with a sphere
+
+
+geometry.
+
+
+We'll give it enough segments for smooth
+
+
+lighting. Let's go 64x 64. That's going
+
+
+to create 4,225
+
+
+verts.
+
+
+Now, we'll load up textures. We'll start
+
+
+with just the day texture. We'll use a
+
+
+mesh standard node material for the
+
+
+globe material. Okay, let's assign the
+
+
+day texture to the color node of our
+
+
+material. If you don't see a sunlit
+
+
+earth here, fix that before moving on.
+
+
+Great. That's working nicely, but our
+
+
+earth lacks a certain realism. It kind
+
+
+of looks like just a globe lit up.
+
+
+If you want to support my channel more
+
+
+directly, Patreon is the move. link in
+
+
+the description. Now, we're going to mix
+
+
+in the night texture based on the sun's
+
+
+orientation.
+
+
+Here's how we compute the sun's
+
+
+orientation.
+
+
+We're going to use a dot product. Each
+
+
+pixel on that sphere. When the sphere is
+
+
+facing the sun directly, that's one.
+
+
+When it's exactly perpendicular, I guess
+
+
+at the edge, that's zero. And if it's
+
+
+completely other side of where our light
+
+
+is pointing, that's negative one. This
+
+
+is how we know if a pixel is in daytime
+
+
+or nighttime.
+
+
+We're going to use a smooth step
+
+
+function to smoothly transition from the
+
+
+light side to the dark side. If we don't
+
+
+use it, we get a smooth transition. It's
+
+
+just not as pronounced as as we'd like
+
+
+it to be. And we could even get rid of
+
+
+that altogether using the step function.
+
+
+Here's what that looks like.
+
+
+Back to smooth step.
+
+
+We're blending the day texture with the
+
+
+night texture based on where the light
+
+
+is. Roughness, the shininess of a
+
+
+material versus the matte quality of a
+
+
+material. We're going to pull that from
+
+
+a special texture that we load. This is
+
+
+an encoded texture packed with lots of
+
+
+data. Bump roughness clouds. So the red
+
+
+channel in this image is the bump data.
+
+
+Where it's fully red, it's as high as it
+
+
+could be. Fully black is not high at
+
+
+all. That's the red channel. In the
+
+
+green channel, roughness. Fully green
+
+
+means it's rough. If it's black, then
+
+
+it's shiny.
+
+
+The blue channel contains the cloud
+
+
+data. We pack it all into one file.
+
+
+There's fewer files to load and it uses
+
+
+less memory. So, we've got the roughness
+
+
+from the green channel. We remap it to a
+
+
+nice range using these uniforms,
+
+
+roughness low and roughness high. This
+
+
+makes the oceans and the land stand out
+
+
+better under the sun.
+
+
+Defining these uniforms at the top of
+
+
+the file makes it so you can easily
+
+
+tweak them. We're going to use the red
+
+
+channel from our encoded image. We're
+
+
+going to feed it into TSL's bump map. It
+
+
+converts the grayscale or in this case
+
+
+just the red channel into perturbed
+
+
+normals making the surface look bumpy
+
+
+without actually changing the geometry.
+
+
+In the case of this project, it's more
+
+
+for the clouds than it is for the
+
+
+mountains. Okay, speaking of clouds,
+
+
+we'll use the blue channel from our
+
+
+special encoded image for the clouds.
+
+
+And now we'll use our trusty smooth step
+
+
+once again to adjust the look of the
+
+
+clouds. We can even animate the clouds
+
+
+using this TSL expression. When we
+
+
+incorporate time, we're getting an
+
+
+animated value, a value that starts,
+
+
+it's like a lapse time. It starts at
+
+
+zero and increments from there. And we
+
+
+can use that for animation purposes like
+
+
+this.
+
+
+This is looking pretty good, but it's
+
+
+still lacking something, and that's the
+
+
+atmospheric glow, frenel shading. What's
+
+
+frenel shading? shading based on how
+
+
+much the surface is angled away from the
+
+
+camera. It's zero when you're looking
+
+
+straight at a pixel and it's one at the
+
+
+edges. Okay, we're going to make the
+
+
+atmosphere color shift blue on the day
+
+
+side, warm near the twilight on the
+
+
+edges, and we're going to blend those
+
+
+colors based on the sun's orientation.
+
+
+Now we mix the atmosphere in with the
+
+
+globe material output which already
+
+
+includes a color node, bump node, the
+
+
+roughness node. [music]
+
+
+The atmospheric strength uses smooth
+
+
+step for a smooth transition based on
+
+
+these values. Then we assign it to the
+
+
+output node of our material. TSL's
+
+
+output is the result of a lighting
+
+
+calculation in the mesh standard
+
+
+material. Now the globe has a really
+
+
+nice atmospheric tint to it.
+
+
+As a final touch, we're going to create
+
+
+an atmosphere shell mesh. It's the same
+
+
+sphere geometry scaled up just a little
+
+
+bit.
+
+
+We'll use a mesh basic material to make
+
+
+it render backside only and slightly
+
+
+transparent.
+
+
+The alpha comes from the Fresnel
+
+
+function shaped with remap and POW and
+
+
+then multiplied by the sun mask. Then we
+
+
+output the atmospheric color with that
+
+
+alpha value. The scale is set to 1.03.
+
+
+So it's just like a halo over our Earth
+
+
+model. We have a simple animation loop
+
+
+where we rotate the Earth slowly, update
+
+
+our orbit controls, and render. That's
+
+
+it. Some easy modifications to try.
+
+
+Separate the clouds into their own
+
+
+sphere and then you can rotate them or
+
+
+manipulate them however you want. Have
+
+
+it cast shadows for example. Play with
+
+
+the ocean roughness. Make it shinier.
+
+
+Add a noise function to alter the
+
+
+shininess mo some. Add an interactive
+
+
+element to this project. Thanks so much
+
+
+for stopping by and I'll see you in the
+
+
+next one.

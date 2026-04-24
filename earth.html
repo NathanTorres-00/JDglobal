@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Urth</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    canvas { display: block; }
+    #badge {
+      position: fixed; bottom: 12px; right: 12px;
+      font: 10px/1 monospace; letter-spacing: 1px;
+      color: rgba(255,255,255,0.25); pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+<div id="badge"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three":         "https://esm.sh/three@0.170.0/webgpu",
+    "three/addons/": "https://esm.sh/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+// ── Imports from the WebGPU build (superset of regular Three.js + TSL nodes) ─
+import {
+  // Renderer
+  WebGPURenderer,
+  // Scene / Camera / Lighting
+  Scene, PerspectiveCamera, DirectionalLight, Group,
+  // Geometry
+  IcosahedronGeometry,
+  // Objects
+  Mesh, Points, BufferGeometry, Float32BufferAttribute,
+  // Node Materials
+  MeshStandardNodeMaterial, MeshBasicNodeMaterial,
+  // Legacy
+  PointsMaterial, TextureLoader, Color, Vector3,
+  // Constants
+  BackSide, AdditiveBlending, ACESFilmicToneMapping, LinearSRGBColorSpace,
+  SRGBColorSpace, NoColorSpace, LinearMipmapLinearFilter,
+  // TSL node constructors
+  texture  as tslTexture,
+  uniform  as tslUniform,
+  vec2, vec3, vec4, float,
+  // TSL built-in attributes
+  uv, normalWorld, positionWorld, cameraPosition,
+  // TSL math ops
+  dot, mix, normalize, pow, smoothstep, clamp,
+  // TSL utils
+  bumpMap, timerLocal,
+} from 'three';
+
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ── Texture base URLs ─────────────────────────────────────────────────────────
+const T4 = 'https://raw.githubusercontent.com/turban/webgl-earth/master/images/';
+const T1 = 'https://raw.githubusercontent.com/bobbyroe/threejs-earth/main/textures/';
+
+// ── Canvas & Renderer: WebGPURenderer auto-falls back to WebGL2 ───────────────
+const canvas = document.createElement('canvas');
+document.body.appendChild(canvas);
+
+const renderer = new WebGPURenderer({ canvas, antialias: true });
+await renderer.init();
+
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping    = ACESFilmicToneMapping;
+renderer.outputColorSpace = LinearSRGBColorSpace;
+
+// Show which GPU backend is active
+const badge = document.getElementById('badge');
+badge.textContent = navigator.gpu ? 'WebGPU' : 'WebGL2';
+
+// ── Scene & Camera ────────────────────────────────────────────────────────────
+const scene  = new Scene();
+const camera = new PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.z = 4;
+
+// ── Orbit Controls ────────────────────────────────────────────────────────────
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping    = true;
+controls.dampingFactor    = 0.05;
+controls.minDistance      = 1.6;
+controls.maxDistance      = 12;
+controls.autoRotate       = true;
+controls.autoRotateSpeed  = 0.4;
+
+// ── Sun ───────────────────────────────────────────────────────────────────────
+const SUN_DIR = new Vector3(-2, 0.5, 1.5).normalize();
+const sunLight = new DirectionalLight(0xffffff, 2.0);
+sunLight.position.copy(SUN_DIR);
+scene.add(sunLight);
+
+// TSL uniform – passed into shader nodes
+const sunDir = tslUniform(SUN_DIR);
+
+// ── Load textures (parallel) ──────────────────────────────────────────────────
+const loader = new TextureLoader();
+
+// Apply quality settings after loading
+function prepTex(tex, { colorSpace = NoColorSpace, anisotropy = 8 } = {}) {
+  tex.colorSpace = colorSpace;
+  tex.anisotropy = anisotropy;
+  tex.minFilter  = LinearMipmapLinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+const [dayTex, nightTex, bumpTex, waterTex, cloudTex] = await Promise.all([
+  loader.loadAsync(T4 + '2_no_clouds_4k.jpg'),   // 4k day surface, no clouds baked in
+  loader.loadAsync(T1 + '03_earthlights1k.jpg'),  // night city lights (1k is fine)
+  loader.loadAsync(T4 + 'elev_bump_4k.jpg'),      // 4k elevation bump
+  loader.loadAsync(T4 + 'water_4k.png'),          // 4k ocean/water mask (1=water, 0=land)
+  loader.loadAsync(T4 + 'fair_clouds_4k.png'),    // 4k cloud layer with alpha
+]);
+
+// Color-space + filtering
+prepTex(dayTex,   { colorSpace: SRGBColorSpace, anisotropy: 16 });
+prepTex(nightTex, { colorSpace: SRGBColorSpace, anisotropy: 8  });
+prepTex(bumpTex,  { anisotropy: 8 });
+prepTex(waterTex, { anisotropy: 8 });
+prepTex(cloudTex, { anisotropy: 16 });
+
+// ── Earth group – 23.4° axial tilt ───────────────────────────────────────────
+const earthGroup = new Group();
+earthGroup.rotation.z = -23.4 * Math.PI / 180;
+scene.add(earthGroup);
+
+const geo = new IcosahedronGeometry(1, 12); // ~4k verts, smooth shading
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SHARED TSL NODES
+// ════════════════════════════════════════════════════════════════════════════
+
+// How much each fragment faces the sun: 1 = noon, 0 = terminator, -1 = midnight
+const sunDot = dot(normalWorld, sunDir);
+
+// Smooth day/night blend factor: 1 on lit side, 0 on dark side
+const dayMix = smoothstep(-0.1, 0.2, sunDot);
+
+// Fresnel: 0 at surface centre facing camera, 1 at silhouette edges
+const viewDir  = normalize(cameraPosition.sub(positionWorld));
+const nDotV    = dot(viewDir, normalWorld).clamp(0.0, 1.0);
+const fresnel  = pow(float(1.0).sub(nDotV), 3.0);
+
+// ════════════════════════════════════════════════════════════════════════════
+//  1.  GLOBE  –  MeshStandardNodeMaterial + TSL
+// ════════════════════════════════════════════════════════════════════════════
+
+const globeMat = new MeshStandardNodeMaterial();
+
+// Color: blend night texture → day texture across the terminator
+const dayNode   = tslTexture(dayTex);
+const nightNode = tslTexture(nightTex);
+globeMat.colorNode = mix(nightNode.rgb, dayNode.rgb, dayMix);
+
+// Roughness: water mask (1=ocean → shiny, 0=land → matte)
+const waterNode = tslTexture(waterTex);
+globeMat.roughnessNode = waterNode.r.oneMinus().remap(0.0, 1.0, 0.05, 0.85);
+globeMat.metalnessNode = float(0.0);
+
+// Bump → perturbed normals from elevation map
+const bumpNode = tslTexture(bumpTex);
+globeMat.normalNode = bumpMap(bumpNode, 0.04);
+
+// Emissive A: city lights – subtle warm glow, visible only deep on the night side
+const cityMask = dayMix.oneMinus().smoothstep(0.0, 0.2);
+const cityGlow = nightNode.rgb.mul(cityMask).mul(0.9);
+
+// Emissive B: atmospheric rim – tight Fresnel, soft blue, no orange tint
+//   Keep it barely visible; real atmospheres from orbit are very thin
+const atmRim     = pow(float(1.0).sub(nDotV), 5.0);             // very tight rim
+const atmDayMask = smoothstep(-0.1, 0.4, sunDot);               // only on lit side
+const atmColor   = vec3(0.25, 0.5, 1.0);                        // desaturated blue
+const atmGlow    = atmColor.mul(atmRim).mul(atmDayMask).mul(0.25); // barely-there rim
+
+globeMat.emissiveNode = cityGlow.add(atmGlow);
+
+const earthMesh = new Mesh(geo, globeMat);
+earthGroup.add(earthMesh);
+
+// ════════════════════════════════════════════════════════════════════════════
+//  2.  ANIMATED CLOUD LAYER  (4k PNG with embedded alpha)
+// ════════════════════════════════════════════════════════════════════════════
+
+// TSL cloud animation – runs entirely on the GPU, no JS rotation needed.
+// t increments with elapsed time (scaled). U drifts eastward; the sin()
+// term adds a barely-perceptible north-south breathing so clouds don't
+// slide in a perfectly rigid line.
+const t       = timerLocal(0.000045);
+const cloudUV = uv().add(vec2(t, t.sin().mul(0.004)));
+
+// fair_clouds_4k.png: cloud density in RGB luminance
+// Higher low-end threshold cuts thin wispy coverage; .mul() caps max opacity
+const cloudSample = tslTexture(cloudTex, cloudUV);
+const cloudMask   = cloudSample.r.smoothstep(0.35, 0.85).mul(0.6);
+
+const cloudMat = new MeshStandardNodeMaterial();
+cloudMat.colorNode     = vec3(1.0, 1.0, 1.0);
+cloudMat.opacityNode   = cloudMask;
+cloudMat.roughnessNode = float(1.0);
+cloudMat.metalnessNode = float(0.0);
+cloudMat.transparent   = true;
+cloudMat.depthWrite    = false;
+
+const cloudMesh = new Mesh(geo, cloudMat);
+cloudMesh.scale.setScalar(1.002);
+earthGroup.add(cloudMesh);
+
+// ════════════════════════════════════════════════════════════════════════════
+//  3.  OUTER ATMOSPHERE SHELL
+//      Backside-only mesh; Fresnel rim × sun mask → blue/orange halo
+// ════════════════════════════════════════════════════════════════════════════
+
+const atmShellMat = new MeshBasicNodeMaterial();
+atmShellMat.side        = BackSide;
+atmShellMat.transparent = true;
+atmShellMat.depthWrite  = false;
+atmShellMat.blending    = AdditiveBlending;
+
+// On the BackSide the face normal points inward; negate to get outward sun angle
+const shellSunDot  = dot(normalWorld.negate(), sunDir);
+const shellSunMask = smoothstep(-0.1, 0.5, shellSunDot);
+
+// View dot (using absolute value handles inward-facing normals correctly)
+const shellNdotV   = dot(viewDir, normalWorld).abs().clamp(0.0, 1.0);
+const shellFresnel = pow(float(1.0).sub(shellNdotV), 2.0);
+
+// Softer, tighter, purely blue halo – no orange, just subtle scattering
+const shellAlpha = shellFresnel.mul(shellSunMask).mul(0.28).clamp(0.0, 0.35);
+const shellColor = vec3(0.2, 0.45, 0.9);   // muted blue
+
+atmShellMat.colorNode   = shellColor;
+atmShellMat.opacityNode = shellAlpha;
+
+const atmShellMesh = new Mesh(geo, atmShellMat);
+atmShellMesh.scale.setScalar(1.035);
+earthGroup.add(atmShellMesh);
+
+// ════════════════════════════════════════════════════════════════════════════
+//  4.  STARFIELD
+// ════════════════════════════════════════════════════════════════════════════
+
+function makeStarfield(numStars = 2500) {
+  const verts = [], colors = [];
+  const col   = new Color();
+  for (let i = 0; i < numStars; i++) {
+    const r     = Math.random() * 25 + 25;
+    const theta = 2 * Math.PI * Math.random();
+    const phi   = Math.acos(2 * Math.random() - 1);
+    verts.push(
+      r * Math.sin(phi) * Math.cos(theta),
+      r * Math.sin(phi) * Math.sin(theta),
+      r * Math.cos(phi)
+    );
+    col.setHSL(0.6, 0.2, Math.random());
+    colors.push(col.r, col.g, col.b);
+  }
+  const g = new BufferGeometry();
+  g.setAttribute('position', new Float32BufferAttribute(verts,  3));
+  g.setAttribute('color',    new Float32BufferAttribute(colors, 3));
+  return new Points(g, new PointsMaterial({
+    size: 0.18, vertexColors: true,
+    map: loader.load(T1 + 'stars/circle.png'),
+    transparent: true,
+  }));
+}
+const stars = makeStarfield();
+scene.add(stars);
+
+// ── Resize ────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ── Render loop ───────────────────────────────────────────────────────────────
+function animate() {
+  requestAnimationFrame(animate);
+  earthMesh.rotation.y += 0.0015;
+  stars.rotation.y     -= 0.00008;
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+animate();
+</script>
+</body>
+</html>

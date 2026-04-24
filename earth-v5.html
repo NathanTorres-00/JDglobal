@@ -3,20 +3,21 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Urth V8 – Dot Globe (Transparent)</title>
+  <title>Urth V5 – Three Globe</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body {
       width: 100%; height: 100%; overflow: hidden;
-      background: transparent;
+      background: radial-gradient(ellipse at center,
+        #0a2347 0%,
+        #061428 55%,
+        #020810 100%
+      );
     }
     canvas { display: block; position: fixed; top: 0; left: 0; }
   </style>
 </head>
 <body>
-
-<!-- Loads GeoJSON as window.CUSTOM_GEO — <script src> works on file:// (no CORS) -->
-<script src="./custom.geo.js"></script>
 
 <script type="importmap">
 {
@@ -31,8 +32,10 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
+// ── Expose THREE globally BEFORE loading the three-globe UMD ──────────────────
 window.THREE = THREE;
 
+// ── Dynamically load three-globe after window.THREE is set ────────────────────
 await new Promise((resolve, reject) => {
   const s  = document.createElement('script');
   s.src    = 'https://cdn.jsdelivr.net/npm/three-globe/dist/three-globe.min.js';
@@ -41,62 +44,15 @@ await new Promise((resolve, reject) => {
   document.head.appendChild(s);
 });
 
-// ── Country data ───────────────────────────────────────────────────────────────
-const countries = window.CUSTOM_GEO.features.filter(
-  f => f.properties.continent !== 'Seven seas (open ocean)'
-);
-
-// ── Land dot grid — point-in-polygon ──────────────────────────────────────────
-const _bboxes = countries.map(f => {
-  let x1=Infinity, x2=-Infinity, y1=Infinity, y2=-Infinity;
-  const rings = f.geometry.type === 'Polygon'
-    ? f.geometry.coordinates
-    : f.geometry.coordinates.flat(1);
-  for (const ring of rings)
-    for (const [lng, lat] of ring) {
-      if (lng < x1) x1 = lng;  if (lng > x2) x2 = lng;
-      if (lat < y1) y1 = lat;  if (lat > y2) y2 = lat;
-    }
-  return { f, x1, x2, y1, y2 };
-});
-
-function _inRing(lng, lat, ring) {
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const [xi, yi] = ring[i], [xj, yj] = ring[j];
-    if (((yi > lat) !== (yj > lat)) && lng < (xj - xi) * (lat - yi) / (yj - yi) + xi)
-      inside = !inside;
-  }
-  return inside;
-}
-function _inFeature(lng, lat, geom) {
-  if (geom.type === 'Polygon') {
-    return _inRing(lng, lat, geom.coordinates[0]) &&
-           !geom.coordinates.slice(1).some(h => _inRing(lng, lat, h));
-  }
-  return geom.coordinates.some(poly =>
-    _inRing(lng, lat, poly[0]) && !poly.slice(1).some(h => _inRing(lng, lat, h))
-  );
-}
-
-const DOT_STEP = 1.2;
-const landDots = [];
-for (let lat = -88; lat <= 88; lat += DOT_STEP) {
-  for (let lng = -180; lng <= 180; lng += DOT_STEP) {
-    for (const b of _bboxes) {
-      if (lng < b.x1 || lng > b.x2 || lat < b.y1 || lat > b.y2) continue;
-      if (_inFeature(lng, lat, b.f.geometry)) {
-        landDots.push({ lat, lng });
-        break;
-      }
-    }
-  }
-}
-
-// ── Coordinate helper — matches three-globe's polar2Cartesian ─────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
+// three-globe's internal GLOBE_RADIUS = 100.  All traveler positions must be
+// in this scale so they sit on the correct sphere surface.
 const GLOBE_R   = 100;
-const ARC_HEIGHT = 0.35;
+const ARC_HEIGHT = 0.35;   // peak lift above surface, in globe-radii
 
+// ── Coordinate helper — MUST match three-globe's polar2Cartesian formula ──────
+// three-globe: θ = (90 - lon) × π/180  (different from standard spherical!)
+// Returns a unit vector; multiply by GLOBE_R to get globe-local world position.
 function latLonToUnit(lat, lon) {
   const phi   = (90 - lat) * Math.PI / 180;
   const theta = (90 - lon) * Math.PI / 180;
@@ -107,7 +63,7 @@ function latLonToUnit(lat, lon) {
   );
 }
 
-// ── Landing spots ─────────────────────────────────────────────────────────────
+// ── Data ──────────────────────────────────────────────────────────────────────
 const SPOTS = [
   { city: 'New York',     lat:  40.7,   lng:  -74.0  },
   { city: 'London',       lat:  51.5,   lng:   -0.1  },
@@ -125,52 +81,36 @@ const SPOTS = [
   { city: 'Nairobi',      lat:  -1.3,   lng:   36.8  },
 ];
 
+// Unit-sphere landing spot vectors (globe-coordinate-system aligned)
 const LANDING_SPOTS = SPOTS.map(s => latLonToUnit(s.lat, s.lng));
 
 // ── Renderer ──────────────────────────────────────────────────────────────────
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
 renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setClearColor(0x000000, 0);  // fully transparent clear
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x000000, 0);  // transparent — CSS gradient shows behind
 document.body.appendChild(renderer.domElement);
 
 // ── Scene & Camera ────────────────────────────────────────────────────────────
 const scene  = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 10000);
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 10000);
+camera.position.z = 270;
 
 // ── Controls ──────────────────────────────────────────────────────────────────
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.05;
 controls.minDistance   = 140;
-controls.maxDistance   = 900;
+controls.maxDistance   = 700;
 controls.rotateSpeed   = 0.5;
 
-// ── Responsive camera fit ─────────────────────────────────────────────────────
-// Scales camera back on portrait/small containers so the globe stays fully visible.
-// Reference: at 45° FOV, camera z=270 fits the globe on a landscape viewport.
-// On portrait, visible width < height, so scale z by h/w to compensate.
-function fitCamera() {
-  const w = window.innerWidth;
-  const h = window.innerHeight;
-  const aspect = w / h;
-  camera.aspect = aspect;
-  camera.position.z = aspect >= 1
-    ? 270                                   // landscape / square: standard distance
-    : Math.min(270 / aspect * 1.05, 900);  // portrait: zoom out to keep globe visible
-  camera.updateProjectionMatrix();
-  renderer.setSize(w, h);
-}
-
-fitCamera();
-window.addEventListener('resize', fitCamera);
-
 // ── Lighting ──────────────────────────────────────────────────────────────────
-scene.add(new THREE.AmbientLight(0xaabbdd, 0.55));
-const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+scene.add(new THREE.AmbientLight(0xbbccff, 0.40));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4);
 sun.position.set(120, 80, 200);
 scene.add(sun);
 
-// ── Starfield ─────────────────────────────────────────────────────────────────
+// ── Starfield (fixed — does not rotate with the globe) ────────────────────────
 (function buildStarfield(count = 2500) {
   const verts  = new Float32Array(count * 3);
   const colors = new Float32Array(count * 3);
@@ -200,16 +140,14 @@ scene.add(sun);
 }());
 
 // ── Globe ─────────────────────────────────────────────────────────────────────
-const DOT_COLOR = 'rgba(148, 190, 220, 0.72)';
+const T4 = 'https://raw.githubusercontent.com/turban/webgl-earth/master/images/';
 
 const globe = new ThreeGlobe()
-  .globeMaterial(new THREE.MeshPhongMaterial({
-    color:     new THREE.Color(0x020d1a),
-    shininess: 12,
-    specular:  new THREE.Color(0x112244),
-  }))
+  .globeImageUrl(T4 + '2_no_clouds_4k.jpg')
+  .bumpImageUrl(T4 + 'elev_bump_4k.jpg')
   .atmosphereColor('lightskyblue')
   .atmosphereAltitude(0.15)
+  // ── Rings: expanding pulse at each landing spot ───────────────────────────
   .ringsData(SPOTS)
   .ringLat(d => d.lat)
   .ringLng(d => d.lng)
@@ -221,180 +159,18 @@ const globe = new ThreeGlobe()
 globe.rotation.z = -23.4 * Math.PI / 180;
 scene.add(globe);
 
-// ── Custom dot mesh with hover lift + glow ────────────────────────────────────
-// Built as a raw Points mesh so the shader can react to mouse position per-dot.
-const _dotDPR = window.devicePixelRatio;
-
-const dotPositions = new Float32Array(landDots.length * 3);
-landDots.forEach((d, i) => {
-  const v = latLonToUnit(d.lat, d.lng).multiplyScalar(GLOBE_R);
-  dotPositions[i*3] = v.x; dotPositions[i*3+1] = v.y; dotPositions[i*3+2] = v.z;
-});
-const dotGeo = new THREE.BufferGeometry();
-dotGeo.setAttribute('position', new THREE.Float32BufferAttribute(dotPositions, 3));
-
-const hoverUniforms = {
-  uMouseHit:    { value: new THREE.Vector3() },
-  uHoverActive: { value: 0.0 },
-  uHoverRadius: { value: 22.0 },        // chord distance (world units) of hover influence
-  uBaseSize:    { value: 4.0 * _dotDPR },
-  uGlowSize:    { value: 24.0 * _dotDPR },
-  uLift:        { value: 2.5 },         // subtle radial lift in world units
-};
-
-const dotVS = /* glsl */`
-  uniform vec3  uMouseHit;
-  uniform float uHoverActive;
-  uniform float uHoverRadius;
-  uniform float uBaseSize;
-  uniform float uGlowSize;
-  uniform float uLift;
-  varying float vHover;
-  varying float vDotFrac;   // fraction of point quad occupied by the base dot
-  void main() {
-    float dist = length(position - uMouseHit);
-    float t    = (1.0 - smoothstep(0.0, uHoverRadius, dist)) * uHoverActive;
-    vHover     = t;
-    // Subtle radial lift — push outward along sphere normal
-    vec3  lifted = position + normalize(position) * uLift * t;
-    float sz     = mix(uBaseSize, uGlowSize, t * t);
-    vDotFrac     = uBaseSize / sz;   // shrinks as point grows, keeps dot same px size
-    gl_PointSize = sz;
-    gl_Position  = projectionMatrix * modelViewMatrix * vec4(lifted, 1.0);
-  }
-`;
-const dotFS = /* glsl */`
-  varying float vHover;
-  varying float vDotFrac;
-  void main() {
-    vec2  cxy = 2.0 * gl_PointCoord - 1.0;
-    float r   = length(cxy);
-    if (r > 1.0) discard;
-    vec3 baseCol = vec3(0.58, 0.745, 0.863);    // original desaturated blue
-    vec3 glowCol = vec3(0.78, 0.97,  1.00);     // bright cyan-white on hover
-    // Core dot: always the same physical pixel size (vDotFrac tracks it)
-    float core = 1.0 - smoothstep(vDotFrac * 0.75, vDotFrac, r);
-    // Strong bloom that fills the extra space when the point grows
-    float glow = exp(-r * r * 2.2) * vHover;
-    float alpha = core * 0.72 + glow * 0.92;
-    vec3  col   = mix(baseCol, glowCol, min(1.0, vHover + glow));
-    gl_FragColor = vec4(col, alpha);
-  }
-`;
-
-const dotMat  = new THREE.ShaderMaterial({
-  uniforms: hoverUniforms, vertexShader: dotVS, fragmentShader: dotFS,
-  transparent: true, depthWrite: false,
-});
-const dotMesh = new THREE.Points(dotGeo, dotMat);
-globe.add(dotMesh);
-
-// ── Mouse hover raycaster ──────────────────────────────────────────────────────
-// Hits the globe sphere, converts to globe-local space (undoes tilt + rotation),
-// then passes the position to the shader uniform.
-const _hRay    = new THREE.Raycaster();
-const _hMouse  = new THREE.Vector2();
-const _hHitPt  = new THREE.Vector3();
-const _hInvQ   = new THREE.Quaternion();
-const _hSphere = new THREE.Sphere(new THREE.Vector3(), GLOBE_R);
-
-window.addEventListener('mousemove', e => {
-  _hMouse.set(
-    (e.clientX / window.innerWidth)  *  2 - 1,
-    -(e.clientY / window.innerHeight) * 2 + 1
-  );
-  _hRay.setFromCamera(_hMouse, camera);
-  if (_hRay.ray.intersectSphere(_hSphere, _hHitPt)) {
-    // Undo globe's current quaternion (tilt + y-rotation) to get local-space coords
-    _hInvQ.copy(globe.quaternion).invert();
-    _hHitPt.applyQuaternion(_hInvQ);
-    hoverUniforms.uMouseHit.value.copy(_hHitPt);
-    hoverUniforms.uHoverActive.value = 1.0;
-  } else {
-    hoverUniforms.uHoverActive.value = 0.0;
-  }
-});
-window.addEventListener('mouseleave', () => { hoverUniforms.uHoverActive.value = 0.0; });
-
-// ── Radial glow rays at selected spots (no travelers visit these) ──────────────
-const RAY_SPOT_INDICES = [1, 4, 7, 10, 13];
-const RAY_HEIGHT = 28;
-const rayTime = { value: 0 };
-
-const rayVS = /* glsl */`
-  varying vec2 vUv;
-  void main() {
-    vUv = uv;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`;
-const rayCoreFS = /* glsl */`
-  uniform float uTime;
-  uniform float uPhase;
-  varying vec2 vUv;
-  void main() {
-    float pulse = pow(max(0.0, sin(uTime * 0.31 + uPhase)), 3.0);
-    if (pulse < 0.005) discard;
-    float t    = vUv.y;
-    float fade = pow(1.0 - t, 1.4);
-    float cx   = vUv.x * 2.0 - 1.0;
-    float edge = pow(1.0 - cx * cx, 1.2);
-    float wisp = 0.75 + 0.25 * sin(t * 18.0 - uTime * 2.0);
-    float alpha = fade * edge * wisp * 0.75 * pulse;
-    vec3 col = mix(vec3(0.50, 0.80, 1.00), vec3(0.78, 0.96, 1.00), t);
-    gl_FragColor = vec4(col, alpha);
-  }
-`;
-const rayHaloFS = /* glsl */`
-  uniform float uTime;
-  uniform float uPhase;
-  varying vec2 vUv;
-  void main() {
-    float pulse = pow(max(0.0, sin(uTime * 0.31 + uPhase)), 3.0);
-    if (pulse < 0.005) discard;
-    float t    = vUv.y;
-    float fade = pow(1.0 - t, 1.8);
-    float cx   = vUv.x * 2.0 - 1.0;
-    float edge = pow(1.0 - cx * cx, 0.65);
-    float wisp = 0.8 + 0.2 * sin(t * 10.0 - uTime * 1.4 + 1.2);
-    gl_FragColor = vec4(0.38, 0.68, 1.00, fade * edge * wisp * 0.22 * pulse);
-  }
-`;
-
-const _up = new THREE.Vector3(0, 1, 0);
-RAY_SPOT_INDICES.forEach((idx, i) => {
-  const phase = (i / RAY_SPOT_INDICES.length) * Math.PI * 2;
-  const perRayUniforms = { uTime: rayTime, uPhase: { value: phase } };
-  const radial = LANDING_SPOTS[idx].clone();
-  const quat   = new THREE.Quaternion().setFromUnitVectors(_up, radial);
-  const center = radial.clone().multiplyScalar(GLOBE_R + RAY_HEIGHT * 0.5);
-
-  const coreGeo = new THREE.CylinderGeometry(0.15, 1.0, RAY_HEIGHT, 12, 6, true);
-  const coreMat = new THREE.ShaderMaterial({
-    uniforms: perRayUniforms, vertexShader: rayVS, fragmentShader: rayCoreFS,
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-  });
-  const coreMesh = new THREE.Mesh(coreGeo, coreMat);
-  coreMesh.position.copy(center); coreMesh.quaternion.copy(quat);
-  globe.add(coreMesh);
-
-  const haloGeo = new THREE.CylinderGeometry(0.5, 3.5, RAY_HEIGHT * 0.75, 10, 6, true);
-  const haloMat = new THREE.ShaderMaterial({
-    uniforms: perRayUniforms, vertexShader: rayVS, fragmentShader: rayHaloFS,
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-  });
-  const haloMesh = new THREE.Mesh(haloGeo, haloMat);
-  haloMesh.position.copy(center); haloMesh.quaternion.copy(quat);
-  globe.add(haloMesh);
-});
-
 // ── Traveler Particle System ───────────────────────────────────────────────────
+// Ported from V4, adapted for three-globe's coordinate system and GLOBE_R=100.
+// All traveler positions live in the globe's LOCAL space (children of `globe`),
+// so they rotate and tilt with the earth automatically.
+
 const N_TRAVELERS = 18;
 const TRAIL_LEN   = 400;
 const DPR         = window.devicePixelRatio;
 const HEAD_SZ     = 6.5 * DPR;
 const TRAIL_SZ    = 3.0 * DPR;
 
+// Returns the geodesic tangent direction on the unit sphere from pos → target
 function geodesicDir(pos, target) {
   return target.clone()
     .addScaledVector(pos, -pos.dot(target))
@@ -419,6 +195,7 @@ const travelers = Array.from({ length: N_TRAVELERS }, () => {
   };
 });
 
+// Pre-allocated typed arrays — zero heap pressure per frame
 const totalPts   = N_TRAVELERS * TRAIL_LEN;
 const tPositions = new Float32Array(totalPts * 3);
 const tAlphas    = new Float32Array(totalPts);
@@ -432,6 +209,7 @@ trailGeo.setAttribute('aAlpha',
 trailGeo.setAttribute('aSize',
   new THREE.BufferAttribute(tSizes,     1).setUsage(THREE.DynamicDrawUsage));
 
+// ── Traveler core shader ───────────────────────────────────────────────────────
 const travelVS = /* glsl */`
   attribute float aAlpha;
   attribute float aSize;
@@ -454,6 +232,8 @@ const travelFS = /* glsl */`
     gl_FragColor = vec4(uColor, vAlpha * glow);
   }
 `;
+
+// ── Glow halo shader (wider, softer, renders behind core) ─────────────────────
 const glowVS = /* glsl */`
   attribute float aAlpha;
   attribute float aSize;
@@ -493,19 +273,25 @@ const glowMat = new THREE.ShaderMaterial({
 });
 
 const trailMesh = new THREE.Points(trailGeo, trailMat);
-const glowMesh  = new THREE.Points(trailGeo, glowMat);
+const glowMesh  = new THREE.Points(trailGeo, glowMat);  // shares same geometry
 trailMesh.renderOrder = 2;
 glowMesh.renderOrder  = 1;
+
+// Add travelers as children of globe so they rotate & tilt with the earth
 globe.add(glowMesh);
 globe.add(trailMesh);
 
 function updateTravelers() {
   travelers.forEach((t, ti) => {
+    // ── Move: Euler step on unit sphere then renormalize ──
     const newPos = t.pos.clone().addScaledVector(t.dir, t.speed).normalize();
+
+    // ── Parallel-transport direction onto the new tangent plane ──
     const newDir = t.dir.clone()
       .addScaledVector(newPos, -t.dir.dot(newPos))
       .normalize();
 
+    // ── Geodesic steering: ramp up lock-on force as traveler nears target ──
     const targetPos    = LANDING_SPOTS[t.target];
     const distToTarget = newPos.distanceTo(targetPos);
     const toTarget     = geodesicDir(newPos, targetPos);
@@ -513,6 +299,7 @@ function updateTravelers() {
     newDir.lerp(toTarget, steerFactor).normalize();
     newDir.addScaledVector(newPos, -newDir.dot(newPos)).normalize();
 
+    // ── Arrival: snap to spot, pick a new destination ──
     if (distToTarget < 0.025) {
       newPos.copy(targetPos);
       let next = t.target;
@@ -527,6 +314,7 @@ function updateTravelers() {
       t.dir = newDir;
     }
 
+    // ── Arc: scale up to GLOBE_R and lift above surface ──
     t.progress      = Math.min(1.0, t.progress + t.speed / t.totalAngle);
     const arcFactor = GLOBE_R * (1.0 + ARC_HEIGHT * Math.sin(t.progress * Math.PI));
     const arcPos    = newPos.clone().multiplyScalar(arcFactor);
@@ -535,6 +323,7 @@ function updateTravelers() {
     t.trail.unshift(arcPos);
     if (t.trail.length > TRAIL_LEN) t.trail.pop();
 
+    // ── Write into pre-allocated typed arrays ──
     const base = ti * TRAIL_LEN;
     for (let i = 0; i < TRAIL_LEN; i++) {
       const bi = (base + i) * 3;
@@ -558,11 +347,17 @@ function updateTravelers() {
   trailGeo.attributes.aSize.needsUpdate    = true;
 }
 
+// ── Resize ────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
 // ── Render loop ───────────────────────────────────────────────────────────────
 function animate() {
   requestAnimationFrame(animate);
   globe.rotation.y += 0.001;
-  rayTime.value = performance.now() / 1000;
   updateTravelers();
   controls.update();
   renderer.render(scene, camera);

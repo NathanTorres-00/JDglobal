@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Urth V8 – Dot Globe (Transparent)</title>
+  <title>Urth V9 – Dot Globe (Auto-Orbit)</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body {
@@ -29,7 +29,6 @@
 
 <script type="module">
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 window.THREE = THREE;
 
@@ -137,26 +136,22 @@ document.body.appendChild(renderer.domElement);
 const scene  = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 10000);
 
-// ── Controls ──────────────────────────────────────────────────────────────────
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.05;
-controls.minDistance   = 140;
-controls.maxDistance   = 900;
-controls.rotateSpeed   = 0.5;
+// ── Auto-orbit state ──────────────────────────────────────────────────────────
+let orbitRadius = 320;
+let orbitAngle  = 0;
+const ORBIT_SPEED  = 0.0018;  // radians/frame — full lap ≈ 58 seconds
+const ORBIT_HEIGHT = 40;      // slight elevation above equator
 
-// ── Responsive camera fit ─────────────────────────────────────────────────────
-// Scales camera back on portrait/small containers so the globe stays fully visible.
-// Reference: at 45° FOV, camera z=270 fits the globe on a landscape viewport.
-// On portrait, visible width < height, so scale z by h/w to compensate.
+// ── Responsive fit ────────────────────────────────────────────────────────────
+// Adjusts orbit radius so the globe stays fully visible on portrait/small containers.
 function fitCamera() {
   const w = window.innerWidth;
   const h = window.innerHeight;
   const aspect = w / h;
   camera.aspect = aspect;
-  camera.position.z = aspect >= 1
-    ? 270                                   // landscape / square: standard distance
-    : Math.min(270 / aspect * 1.05, 900);  // portrait: zoom out to keep globe visible
+  orbitRadius = aspect >= 1
+    ? 320
+    : Math.min(320 / aspect * 1.05, 900);
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
 }
@@ -210,6 +205,13 @@ const globe = new ThreeGlobe()
   }))
   .atmosphereColor('lightskyblue')
   .atmosphereAltitude(0.15)
+  .pointsData(landDots)
+  .pointLat(d => d.lat)
+  .pointLng(d => d.lng)
+  .pointColor(() => DOT_COLOR)
+  .pointRadius(0.32)
+  .pointAltitude(0.002)
+  .pointsMerge(true)
   .ringsData(SPOTS)
   .ringLat(d => d.lat)
   .ringLng(d => d.lng)
@@ -220,101 +222,6 @@ const globe = new ThreeGlobe()
 
 globe.rotation.z = -23.4 * Math.PI / 180;
 scene.add(globe);
-
-// ── Custom dot mesh with hover lift + glow ────────────────────────────────────
-// Built as a raw Points mesh so the shader can react to mouse position per-dot.
-const _dotDPR = window.devicePixelRatio;
-
-const dotPositions = new Float32Array(landDots.length * 3);
-landDots.forEach((d, i) => {
-  const v = latLonToUnit(d.lat, d.lng).multiplyScalar(GLOBE_R);
-  dotPositions[i*3] = v.x; dotPositions[i*3+1] = v.y; dotPositions[i*3+2] = v.z;
-});
-const dotGeo = new THREE.BufferGeometry();
-dotGeo.setAttribute('position', new THREE.Float32BufferAttribute(dotPositions, 3));
-
-const hoverUniforms = {
-  uMouseHit:    { value: new THREE.Vector3() },
-  uHoverActive: { value: 0.0 },
-  uHoverRadius: { value: 22.0 },        // chord distance (world units) of hover influence
-  uBaseSize:    { value: 4.0 * _dotDPR },
-  uGlowSize:    { value: 24.0 * _dotDPR },
-  uLift:        { value: 2.5 },         // subtle radial lift in world units
-};
-
-const dotVS = /* glsl */`
-  uniform vec3  uMouseHit;
-  uniform float uHoverActive;
-  uniform float uHoverRadius;
-  uniform float uBaseSize;
-  uniform float uGlowSize;
-  uniform float uLift;
-  varying float vHover;
-  varying float vDotFrac;   // fraction of point quad occupied by the base dot
-  void main() {
-    float dist = length(position - uMouseHit);
-    float t    = (1.0 - smoothstep(0.0, uHoverRadius, dist)) * uHoverActive;
-    vHover     = t;
-    // Subtle radial lift — push outward along sphere normal
-    vec3  lifted = position + normalize(position) * uLift * t;
-    float sz     = mix(uBaseSize, uGlowSize, t * t);
-    vDotFrac     = uBaseSize / sz;   // shrinks as point grows, keeps dot same px size
-    gl_PointSize = sz;
-    gl_Position  = projectionMatrix * modelViewMatrix * vec4(lifted, 1.0);
-  }
-`;
-const dotFS = /* glsl */`
-  varying float vHover;
-  varying float vDotFrac;
-  void main() {
-    vec2  cxy = 2.0 * gl_PointCoord - 1.0;
-    float r   = length(cxy);
-    if (r > 1.0) discard;
-    vec3 baseCol = vec3(0.58, 0.745, 0.863);    // original desaturated blue
-    vec3 glowCol = vec3(0.78, 0.97,  1.00);     // bright cyan-white on hover
-    // Core dot: always the same physical pixel size (vDotFrac tracks it)
-    float core = 1.0 - smoothstep(vDotFrac * 0.75, vDotFrac, r);
-    // Strong bloom that fills the extra space when the point grows
-    float glow = exp(-r * r * 2.2) * vHover;
-    float alpha = core * 0.72 + glow * 0.92;
-    vec3  col   = mix(baseCol, glowCol, min(1.0, vHover + glow));
-    gl_FragColor = vec4(col, alpha);
-  }
-`;
-
-const dotMat  = new THREE.ShaderMaterial({
-  uniforms: hoverUniforms, vertexShader: dotVS, fragmentShader: dotFS,
-  transparent: true, depthWrite: false,
-});
-const dotMesh = new THREE.Points(dotGeo, dotMat);
-globe.add(dotMesh);
-
-// ── Mouse hover raycaster ──────────────────────────────────────────────────────
-// Hits the globe sphere, converts to globe-local space (undoes tilt + rotation),
-// then passes the position to the shader uniform.
-const _hRay    = new THREE.Raycaster();
-const _hMouse  = new THREE.Vector2();
-const _hHitPt  = new THREE.Vector3();
-const _hInvQ   = new THREE.Quaternion();
-const _hSphere = new THREE.Sphere(new THREE.Vector3(), GLOBE_R);
-
-window.addEventListener('mousemove', e => {
-  _hMouse.set(
-    (e.clientX / window.innerWidth)  *  2 - 1,
-    -(e.clientY / window.innerHeight) * 2 + 1
-  );
-  _hRay.setFromCamera(_hMouse, camera);
-  if (_hRay.ray.intersectSphere(_hSphere, _hHitPt)) {
-    // Undo globe's current quaternion (tilt + y-rotation) to get local-space coords
-    _hInvQ.copy(globe.quaternion).invert();
-    _hHitPt.applyQuaternion(_hInvQ);
-    hoverUniforms.uMouseHit.value.copy(_hHitPt);
-    hoverUniforms.uHoverActive.value = 1.0;
-  } else {
-    hoverUniforms.uHoverActive.value = 0.0;
-  }
-});
-window.addEventListener('mouseleave', () => { hoverUniforms.uHoverActive.value = 0.0; });
 
 // ── Radial glow rays at selected spots (no travelers visit these) ──────────────
 const RAY_SPOT_INDICES = [1, 4, 7, 10, 13];
@@ -561,10 +468,19 @@ function updateTravelers() {
 // ── Render loop ───────────────────────────────────────────────────────────────
 function animate() {
   requestAnimationFrame(animate);
-  globe.rotation.y += 0.001;
+  // Globe self-rotation removed — camera orbit provides all motion
   rayTime.value = performance.now() / 1000;
+
+  // Slowly orbit the camera around the globe
+  orbitAngle += ORBIT_SPEED;
+  camera.position.set(
+    orbitRadius * Math.sin(orbitAngle),
+    ORBIT_HEIGHT,
+    orbitRadius * Math.cos(orbitAngle)
+  );
+  camera.lookAt(0, 0, 0);
+
   updateTravelers();
-  controls.update();
   renderer.render(scene, camera);
 }
 
